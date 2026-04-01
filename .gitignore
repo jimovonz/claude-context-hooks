@@ -23,3 +23,7 @@ Thumbs.db
 credentials.json
 *.credentials*
 *.secret*
+
+# Test/build artifacts
+.coverage
+manifest.json

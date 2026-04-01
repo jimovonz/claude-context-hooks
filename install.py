@@ -2,16 +2,16 @@
 """
 Installer for Claude Code context hooks.
 
-Copies hook scripts to ~/.claude/hooks/ and registers them in settings.json.
+Symlinks hook scripts into ~/.claude/hooks/ and registers them in settings.json.
 Does not modify the Claude Code executable in any way.
 
 Usage:
-    python install.py           # Install hooks
-    python install.py --remove  # Remove hooks from settings.json
+    python install.py           # Install hooks (symlinks)
+    python install.py --remove  # Remove hooks and settings registrations
 """
 
 import json
-import shutil
+import os
 import sys
 from pathlib import Path
 
@@ -29,6 +29,7 @@ HOOK_FILES = [
     'context-monitor.py',
     'ccm-get.py',
     'config.py',
+    'lib/__init__.py',
     'lib/ccm_cache.py',
     'lib/common.py',
 ]
@@ -67,8 +68,8 @@ HOOK_CONFIG = {
 }
 
 
-def copy_files():
-    """Copy hook files to ~/.claude/hooks/."""
+def install_files():
+    """Symlink hook files into ~/.claude/hooks/."""
     HOOKS_DST.mkdir(parents=True, exist_ok=True)
     (HOOKS_DST / 'lib').mkdir(exist_ok=True)
 
@@ -77,26 +78,29 @@ def copy_files():
     (cache_dir / 'blobs').mkdir(parents=True, exist_ok=True)
     (cache_dir / 'meta').mkdir(parents=True, exist_ok=True)
 
-    copied = 0
+    installed = 0
     for f in HOOK_FILES:
-        src = HOOKS_SRC / f
+        src = (HOOKS_SRC / f).resolve()
         dst = HOOKS_DST / f
 
         if not src.exists():
             print(f"  SKIP {f} (not found)")
             continue
 
-        # Don't overwrite user's config if it exists
-        if f == 'config.py' and dst.exists():
-            print(f"  KEEP {f} (existing config preserved)")
+        # Don't overwrite user's config if it's not a symlink back to us
+        if f == 'config.py' and dst.exists() and not dst.is_symlink():
+            print(f"  KEEP {f} (user config preserved)")
             continue
 
-        shutil.copy2(src, dst)
-        dst.chmod(0o755)
-        copied += 1
-        print(f"  COPY {f}")
+        # Remove existing file/symlink before creating new symlink
+        if dst.exists() or dst.is_symlink():
+            dst.unlink()
 
-    print(f"\n  {copied} files installed to {HOOKS_DST}")
+        os.symlink(src, dst)
+        installed += 1
+        print(f"  LINK {f} -> {src}")
+
+    print(f"\n  {installed} files symlinked into {HOOKS_DST}")
 
 
 def merge_settings():
@@ -136,9 +140,30 @@ def merge_settings():
 
 
 def remove_hooks():
-    """Remove hook registrations from settings.json."""
+    """Remove hook symlinks and settings registrations."""
+    # Remove symlinks
+    removed_files = 0
+    for f in HOOK_FILES:
+        dst = HOOKS_DST / f
+        if dst.is_symlink():
+            dst.unlink()
+            removed_files += 1
+            print(f"  UNLINK {f}")
+        elif dst.exists():
+            print(f"  SKIP {f} (not a symlink — left in place)")
+
+    # Clean up empty lib dir
+    lib_dir = HOOKS_DST / 'lib'
+    if lib_dir.is_dir() and not any(lib_dir.iterdir()):
+        lib_dir.rmdir()
+        print(f"  RMDIR lib/")
+
+    if removed_files:
+        print(f"\n  {removed_files} symlinks removed from {HOOKS_DST}")
+
+    # Remove settings registrations
     if not SETTINGS_FILE.exists():
-        print("No settings.json found")
+        print("\n  No settings.json found")
         return
 
     settings = json.loads(SETTINGS_FILE.read_text())
@@ -150,7 +175,7 @@ def remove_hooks():
             for hook in entry.get('hooks', []):
                 our_commands.add(hook.get('command', ''))
 
-    removed = 0
+    removed_reg = 0
     for event in list(hooks.keys()):
         original_len = len(hooks[event])
         hooks[event] = [
@@ -160,14 +185,13 @@ def remove_hooks():
                 for hook in entry.get('hooks', [])
             )
         ]
-        removed += original_len - len(hooks[event])
+        removed_reg += original_len - len(hooks[event])
         if not hooks[event]:
             del hooks[event]
 
     settings['hooks'] = hooks
     SETTINGS_FILE.write_text(json.dumps(settings, indent=2) + '\n')
-    print(f"  Removed {removed} hook registrations from {SETTINGS_FILE}")
-    print(f"  Hook files left in {HOOKS_DST} (delete manually if desired)")
+    print(f"\n  Removed {removed_reg} hook registrations from {SETTINGS_FILE}")
 
 
 def check_optional_deps():
@@ -191,16 +215,18 @@ def check_optional_deps():
 
 def main():
     if '--remove' in sys.argv:
-        print("Removing hook registrations...")
+        print("Removing Claude Code context hooks...\n")
         remove_hooks()
+        print("\nDone.")
         return
 
     print("Installing Claude Code context hooks...\n")
-    copy_files()
+    install_files()
     print()
     merge_settings()
     check_optional_deps()
     print("\nDone. Hooks will activate on next Claude Code session.")
+    print("Updates: git pull (symlinks update automatically)")
 
 
 if __name__ == '__main__':

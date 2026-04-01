@@ -47,9 +47,9 @@ cd claude-context-hooks
 python install.py
 ```
 
-This copies hooks to `~/.claude/hooks/` and registers them in `~/.claude/settings.json`.
+This symlinks hooks into `~/.claude/hooks/` and registers them in `~/.claude/settings.json`. Updates are just `git pull` — symlinks pick up changes automatically.
 
-To unregister:
+To uninstall (removes symlinks and settings registrations):
 
 ```bash
 python install.py --remove
