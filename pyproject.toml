@@ -1,8 +1,3 @@
 [tool.pytest.ini_options]
-markers = [
-    "behavioural: normal input, verify correct output",
-    "edge: empty, null, zero, boundary values",
-    "error: invalid input, exceptions, failure modes",
-    "adversarial: malformed data, unexpected types, contract violations",
-]
-pythonpath = ["hooks", "."]
+testpaths = ["tests"]
+addopts = "-q"

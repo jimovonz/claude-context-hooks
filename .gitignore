@@ -27,3 +27,7 @@ credentials.json
 # Test/build artifacts
 .coverage
 manifest.json
+
+# Hook runtime logs
+hooks/*.log
+hooks/retrieval.log

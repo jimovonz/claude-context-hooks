@@ -1,68 +1,56 @@
-"""Shared fixtures for claude-context-hooks tests."""
-
 import json
 import os
+import subprocess
 import sys
-import pytest
 from pathlib import Path
-from unittest.mock import patch
 
-# Add hooks directory to path so we can import modules
-HOOKS_DIR = Path(__file__).parent.parent / 'hooks'
+import pytest
+
+REPO_ROOT = Path(__file__).resolve().parent.parent
+HOOKS_DIR = REPO_ROOT / 'hooks'
+
 sys.path.insert(0, str(HOOKS_DIR))
-sys.path.insert(0, str(HOOKS_DIR.parent))
 
 
 @pytest.fixture
-def tmp_cache(tmp_path):
-    """Provide a temporary cache directory and initialize CCM."""
-    from lib.ccm_cache import init_ccm_cache
-    init_ccm_cache(tmp_path)
-    return tmp_path
+def tmp_cache(tmp_path, monkeypatch):
+    """Redirect ccm cache to a tmp dir for the duration of a test."""
+    cache_root = tmp_path / 'cache'
+    cache_root.mkdir()
+    from lib import ccm_cache
+    ccm_cache.init_ccm_cache(cache_root)
+    yield cache_root
 
 
 @pytest.fixture
-def tmp_session(tmp_path):
-    """Provide a temporary session transcript file."""
-    session_file = tmp_path / "test-session.jsonl"
-    session_file.touch()
-    return session_file
+def run_hook(tmp_path, monkeypatch):
+    """Run a hook script as a subprocess with a JSON stdin payload.
 
+    Returns a callable: run_hook(hook_path, payload_dict, env=None) ->
+    (returncode, stdout_obj_or_str, stderr_str).
+    Stdout is parsed as JSON when possible.
+    """
+    def _run(hook_path: Path, payload: dict, env=None, decode_json=True):
+        environ = os.environ.copy()
+        environ['HOME'] = str(tmp_path)
+        if env:
+            environ.update(env)
+        proc = subprocess.run(
+            [sys.executable, str(hook_path)],
+            input=json.dumps(payload).encode('utf-8'),
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            env=environ,
+            timeout=10,
+        )
+        out = proc.stdout.decode('utf-8', errors='replace').strip()
+        err = proc.stderr.decode('utf-8', errors='replace')
+        parsed = out
+        if decode_json and out:
+            try:
+                parsed = json.loads(out)
+            except json.JSONDecodeError:
+                pass
+        return proc.returncode, parsed, err
 
-@pytest.fixture
-def hook_input_factory():
-    """Factory for creating hook input dicts."""
-    def _make(tool_name, tool_input=None, transcript_path="", tool_use_id="test-id-123", cwd="/tmp"):
-        return {
-            "tool_name": tool_name,
-            "tool_input": tool_input or {},
-            "transcript_path": transcript_path,
-            "tool_use_id": tool_use_id,
-            "session": {"cwd": cwd},
-        }
-    return _make
-
-
-@pytest.fixture(autouse=True)
-def isolate_ccm_globals():
-    """Reset CCM cache globals between tests."""
-    import lib.ccm_cache as ccm
-    old_values = {
-        'CCM_CACHE_DIR': ccm.CCM_CACHE_DIR,
-        'CCM_BLOBS_DIR': ccm.CCM_BLOBS_DIR,
-        'CCM_META_DIR': ccm.CCM_META_DIR,
-        'CCM_INDEX_FILE': ccm.CCM_INDEX_FILE,
-        'CCM_LAST_KEY_FILE': ccm.CCM_LAST_KEY_FILE,
-    }
-    yield
-    for k, v in old_values.items():
-        setattr(ccm, k, v)
-
-
-@pytest.fixture
-def mock_stdin():
-    """Helper to mock sys.stdin with JSON data."""
-    import io
-    def _mock(data):
-        return io.StringIO(json.dumps(data))
-    return _mock
+    return _run

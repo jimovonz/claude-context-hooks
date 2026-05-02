@@ -1,116 +1,177 @@
-"""Tests for install.py"""
+"""Tests for install.py — settings merge, idempotence, --remove."""
 
 import json
+import os
+import subprocess
 import sys
-import pytest
 from pathlib import Path
-from unittest.mock import patch
 
-sys.path.insert(0, str(Path(__file__).parent.parent))
-import install
+import pytest
 
-
-# ─── merge_settings (non-trivial: 4 tests) ──────────────────
-
-#TAG: [J001]
-# Verifies: merge_settings adds hook entries to empty settings.json
-@pytest.mark.behavioural
-def test_merge_settings_empty(tmp_path):
-    settings_file = tmp_path / "settings.json"
-    settings_file.write_text("{}")
-    with patch.object(install, 'SETTINGS_FILE', settings_file):
-        install.merge_settings()
-    result = json.loads(settings_file.read_text())
-    assert 'hooks' in result
-    assert 'PreToolUse' in result['hooks']
-    assert len(result['hooks']['PreToolUse']) == 5  # Bash, Glob, Grep, Read, WebFetch
-    assert 'UserPromptSubmit' in result['hooks']
-    assert len(result['hooks']['UserPromptSubmit']) == 1
+REPO_ROOT = Path(__file__).resolve().parent.parent
+INSTALLER = REPO_ROOT / 'install.py'
 
 
-#TAG: [J002]
-# Verifies: merge_settings does not duplicate already-registered hooks
-@pytest.mark.edge
-def test_merge_settings_no_duplicates(tmp_path):
-    settings_file = tmp_path / "settings.json"
-    settings_file.write_text("{}")
-    with patch.object(install, 'SETTINGS_FILE', settings_file):
-        install.merge_settings()
-        install.merge_settings()  # second call
-    result = json.loads(settings_file.read_text())
-    assert len(result['hooks']['PreToolUse']) == 5  # still 5, not 10
+def _run(args, home: Path):
+    env = os.environ.copy()
+    env['HOME'] = str(home)
+    proc = subprocess.run(
+        [sys.executable, str(INSTALLER), *args],
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=env, timeout=15,
+    )
+    return proc.returncode, proc.stdout.decode(), proc.stderr.decode()
 
 
-#TAG: [J003]
-# Verifies: merge_settings handles corrupt settings.json by creating fresh settings
-@pytest.mark.error
-def test_merge_settings_corrupt_file(tmp_path):
-    settings_file = tmp_path / "settings.json"
-    settings_file.write_text("not json{{{")
-    with patch.object(install, 'SETTINGS_FILE', settings_file):
-        install.merge_settings()
-    result = json.loads(settings_file.read_text())
-    assert 'hooks' in result
+def test_install_creates_symlinks(tmp_path):
+    rc, out, err = _run([], tmp_path)
+    assert rc == 0
+    hooks = tmp_path / '.claude' / 'hooks'
+    assert (hooks / 'intercept-bash.py').is_symlink()
+    assert (hooks / 'intercept-read.py').is_symlink()
+    assert (hooks / 'cache-wrap.py').is_symlink()
+    assert (hooks / 'lib' / 'ccm_cache.py').is_symlink()
 
 
-#TAG: [J004]
-# Verifies: merge_settings preserves existing non-hook settings
-@pytest.mark.adversarial
-def test_merge_settings_preserves_existing(tmp_path):
-    settings_file = tmp_path / "settings.json"
-    settings_file.write_text(json.dumps({
-        "theme": "dark",
-        "hooks": {
-            "PreToolUse": [
-                {"matcher": "CustomTool", "hooks": [{"type": "command", "command": "my-hook.py"}]}
-            ]
+def test_install_registers_hooks(tmp_path):
+    _run([], tmp_path)
+    settings = json.loads((tmp_path / '.claude' / 'settings.json').read_text())
+    matchers = [
+        e.get('matcher')
+        for e in settings['hooks']['PreToolUse']
+        if any('intercept-' in h.get('command', '') for h in e.get('hooks', []))
+    ]
+    assert set(matchers) == {'Bash', 'Read', 'Grep', 'Glob', 'WebFetch'}
+
+
+def test_install_appends_after_existing_bash_hook(tmp_path):
+    """Simulate an existing RTK PreToolUse:Bash entry — we must append, not replace."""
+    settings_path = tmp_path / '.claude' / 'settings.json'
+    settings_path.parent.mkdir(parents=True)
+    settings_path.write_text(json.dumps({
+        'hooks': {
+            'PreToolUse': [{
+                'matcher': 'Bash',
+                'hooks': [{'type': 'command', 'command': '/usr/local/bin/rtk-rewrite.sh'}],
+            }],
         }
     }))
-    with patch.object(install, 'SETTINGS_FILE', settings_file):
-        install.merge_settings()
-    result = json.loads(settings_file.read_text())
-    assert result['theme'] == 'dark'
-    # Should have custom + our 5
-    assert len(result['hooks']['PreToolUse']) == 6
-    commands = [
-        entry.get('hooks', [{}])[0].get('command', '')
-        for entry in result['hooks']['PreToolUse']
+    _run([], tmp_path)
+    settings = json.loads(settings_path.read_text())
+    pretool = settings['hooks']['PreToolUse']
+    bash_entries = [e for e in pretool if e.get('matcher') == 'Bash']
+    assert len(bash_entries) == 2
+    # RTK is first, ours is second
+    assert 'rtk-rewrite' in bash_entries[0]['hooks'][0]['command']
+    assert 'intercept-bash' in bash_entries[1]['hooks'][0]['command']
+
+
+def test_install_idempotent(tmp_path):
+    _run([], tmp_path)
+    _run([], tmp_path)
+    settings = json.loads((tmp_path / '.claude' / 'settings.json').read_text())
+    bash_entries = [
+        e for e in settings['hooks']['PreToolUse']
+        if e.get('matcher') == 'Bash'
+        and any('intercept-bash' in h.get('command', '') for h in e.get('hooks', []))
     ]
-    assert 'my-hook.py' in commands
+    assert len(bash_entries) == 1
 
 
-# ─── remove_hooks ────────────────────────────────────────────
-
-#TAG: [J005]
-# Verifies: remove_hooks removes all registered hook entries from settings
-@pytest.mark.behavioural
-def test_remove_hooks(tmp_path):
-    settings_file = tmp_path / "settings.json"
-    settings_file.write_text("{}")
-    with patch.object(install, 'SETTINGS_FILE', settings_file):
-        install.merge_settings()
-        install.remove_hooks()
-    result = json.loads(settings_file.read_text())
-    # All hooks removed, events with empty arrays get deleted
-    for event, entries in result.get('hooks', {}).items():
-        for entry in entries:
-            for hook in entry.get('hooks', []):
-                assert '~/.claude/hooks/' not in hook.get('command', '')
+def test_remove_undoes_install(tmp_path):
+    _run([], tmp_path)
+    _run(['--remove'], tmp_path)
+    hooks = tmp_path / '.claude' / 'hooks'
+    assert not (hooks / 'intercept-bash.py').exists()
+    settings = json.loads((tmp_path / '.claude' / 'settings.json').read_text())
+    pretool = settings.get('hooks', {}).get('PreToolUse', [])
+    for entry in pretool:
+        for h in entry.get('hooks', []):
+            assert 'intercept-' not in h.get('command', '')
+            assert 'cache-wrap' not in h.get('command', '')
 
 
-# ─── copy_files ──────────────────────────────────────────────
+def test_remove_preserves_other_bash_hooks(tmp_path):
+    settings_path = tmp_path / '.claude' / 'settings.json'
+    settings_path.parent.mkdir(parents=True)
+    settings_path.write_text(json.dumps({
+        'hooks': {
+            'PreToolUse': [{
+                'matcher': 'Bash',
+                'hooks': [{'type': 'command', 'command': '/usr/local/bin/rtk-rewrite.sh'}],
+            }],
+        }
+    }))
+    _run([], tmp_path)
+    _run(['--remove'], tmp_path)
+    settings = json.loads(settings_path.read_text())
+    pretool = settings['hooks']['PreToolUse']
+    rtk_present = any(
+        'rtk-rewrite' in h.get('command', '')
+        for entry in pretool for h in entry.get('hooks', [])
+    )
+    assert rtk_present
 
-#TAG: [J006]
-# Verifies: copy_files creates destination directories and copies hook files
-@pytest.mark.behavioural
-def test_copy_files(tmp_path):
-    hooks_dst = tmp_path / "hooks"
-    with patch.object(install, 'HOOKS_DST', hooks_dst), \
-         patch.object(install, 'HOOKS_SRC', Path(__file__).parent.parent / 'hooks'), \
-         patch('pathlib.Path.home', return_value=tmp_path):
-        install.copy_files()
-    assert hooks_dst.exists()
-    assert (hooks_dst / 'lib').is_dir()
-    # At least some files should be copied
-    copied_files = list(hooks_dst.glob('*.py'))
-    assert len(copied_files) > 0
+
+def test_install_creates_claude_md_with_snippet(tmp_path):
+    _run([], tmp_path)
+    claude_md = tmp_path / '.claude' / 'CLAUDE.md'
+    assert claude_md.exists()
+    body = claude_md.read_text()
+    assert 'BEGIN claude-context-hooks routing policy' in body
+    assert 'END claude-context-hooks routing policy' in body
+    assert 'Tool routing' in body  # actual snippet content
+
+
+def test_install_appends_to_existing_claude_md_preserving_user_content(tmp_path):
+    claude_md = tmp_path / '.claude' / 'CLAUDE.md'
+    claude_md.parent.mkdir(parents=True)
+    user_text = '# My personal CLAUDE.md\n\nSome custom instruction here.\n'
+    claude_md.write_text(user_text)
+    _run([], tmp_path)
+    body = claude_md.read_text()
+    assert user_text.rstrip() in body
+    assert 'BEGIN claude-context-hooks routing policy' in body
+
+
+def test_install_idempotent_on_claude_md(tmp_path):
+    _run([], tmp_path)
+    first = (tmp_path / '.claude' / 'CLAUDE.md').read_text()
+    _run([], tmp_path)
+    second = (tmp_path / '.claude' / 'CLAUDE.md').read_text()
+    # Should NOT duplicate the block
+    assert second.count('BEGIN claude-context-hooks routing policy') == 1
+    # Content stable across re-installs
+    assert first == second
+
+
+def test_install_no_instructions_flag_skips_claude_md(tmp_path):
+    _run(['--no-instructions'], tmp_path)
+    claude_md = tmp_path / '.claude' / 'CLAUDE.md'
+    assert not claude_md.exists()
+
+
+def test_remove_strips_claude_md_block_preserving_user_content(tmp_path):
+    claude_md = tmp_path / '.claude' / 'CLAUDE.md'
+    claude_md.parent.mkdir(parents=True)
+    user_text = '# Personal\n\nMy stuff.\n'
+    claude_md.write_text(user_text)
+    _run([], tmp_path)
+    _run(['--remove'], tmp_path)
+    body = claude_md.read_text()
+    assert 'BEGIN claude-context-hooks routing policy' not in body
+    assert 'My stuff.' in body
+
+
+def test_remove_deletes_claude_md_when_only_our_block(tmp_path):
+    _run([], tmp_path)
+    _run(['--remove'], tmp_path)
+    assert not (tmp_path / '.claude' / 'CLAUDE.md').exists()
+
+
+def test_check_only(tmp_path):
+    rc, out, err = _run(['--check'], tmp_path)
+    assert rc == 0
+    assert 'python_310' in out
+    assert 'rtk_on_path' in out
+    # No installation
+    assert not (tmp_path / '.claude' / 'hooks').exists()

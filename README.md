@@ -1,137 +1,77 @@
-# Claude Context Hooks
+# claude-context-hooks
 
-[![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
-[![Python](https://img.shields.io/badge/python-3.10%2B-blue.svg)](https://www.python.org/)
-[![Platform](https://img.shields.io/badge/platform-Linux-lightgrey.svg)](https://www.linux.org/)
+Lightweight Claude Code hook layer that minimises tool-output context cost
+by routing all data interaction through a single Bash data path. Built-in
+`Read`, `Grep`, `Glob`, and `WebFetch` are blocked with narrow allowances;
+Bash output is RTK-compressed and large residuals are cached for selective
+querying via `ccm-get.py`.
 
-Lightweight hooks for Claude Code that cache large tool outputs to keep your context window clean. No CLI modifications required.
+Coexists with [RTK](https://github.com/rtk-ai/rtk) and
+[Cairn](https://github.com/jimovonz/cairn).
 
-Extracted from [claude-context-manager](https://github.com/jimovonz/claude-context-manager) -- the standalone components that don't depend on executable patching.
+## Architecture in one breath
 
-## The Problem
+Block built-in tools → all data goes through Bash → RTK compresses Bash →
+wrapper caches residual large output → `ccm-get.py` retrieves selectively.
+Cairn untouched.
 
-Even with 1M token contexts, large tool outputs pollute your conversation. A single `grep -r` or build log can dump 50k+ tokens of noise that stays in context forever, displacing useful reasoning. Multiply that across a session and you're compacting much sooner than necessary.
+See [`docs/DESIGN.md`](docs/DESIGN.md) for the full design.
 
-## How It Works
-
-PreToolUse hooks intercept Bash, Glob, Grep, Read, and WebFetch calls. The hook **executes the tool itself**, and if the output exceeds a threshold (default 8KB), caches it to disk and returns a compact stub instead:
+## Install
 
 ```
-[CCM_CACHED]
-~tokens: 12k
-lines: 487
-[/CCM_CACHED]
-Retrieve: ccm-get.py abc123def0 [--grep PATTERN] [--head N] [--lines N-M]
-```
-
-The model then retrieves only what it needs via filtered access:
-
-```bash
-ccm-get.py <key> --grep "error|warn"     # Lines matching pattern
-ccm-get.py <key> --head 50               # First 50 lines
-ccm-get.py <key> --tail 20               # Last 20 lines
-ccm-get.py <key> --lines 100-200         # Line range
-```
-
-Small outputs (under threshold) pass through inline -- no overhead for simple commands.
-
-### Subagent passthrough
-
-Subagent (Task/Agent) tool calls pass through unintercepted. This lets you delegate data-intensive work to subagents without context cost to the main conversation.
-
-## Installation
-
-```bash
-git clone https://github.com/jimovonz/claude-context-hooks.git
+git clone https://github.com/jimovonz/claude-context-hooks
 cd claude-context-hooks
-python install.py
+python3 install.py
 ```
 
-This symlinks hooks into `~/.claude/hooks/` and registers them in `~/.claude/settings.json`. Updates are just `git pull` — symlinks pick up changes automatically.
+The installer symlinks hooks into `~/.claude/hooks/`, registers them in
+`~/.claude/settings.json` (appending after any existing PreToolUse:Bash
+hook so RTK's rewrite still fires first), and warns if `rtk` is not on
+PATH. Updates: `git pull` (symlinks track the working copy).
 
-To uninstall (removes symlinks and settings registrations):
+Then paste [`docs/CLAUDE_MD_SNIPPET.md`](docs/CLAUDE_MD_SNIPPET.md) into
+your `~/.claude/CLAUDE.md` so the model knows how to route.
 
-```bash
-python install.py --remove
-```
-
-### Optional dependencies
-
-```bash
-pip install zstandard   # Better compression (falls back to gzip)
-pip install tiktoken    # Accurate token counting for context monitor (falls back to char estimate)
-```
+`python3 install.py --remove` cleans up symlinks and settings entries.
+`python3 install.py --check` runs pre-flight checks only.
 
 ## Components
 
-| File | Hook | Purpose |
-|------|------|---------|
-| `intercept-bash.py` | PreToolUse (Bash) | Execute commands, cache large output, detect interactive commands |
-| `intercept-glob.py` | PreToolUse (Glob) | Execute file patterns via `fd`/`find`, cache large listings |
-| `intercept-grep.py` | PreToolUse (Grep) | Execute via ripgrep, cache large search results |
-| `intercept-read.py` | PreToolUse (Read) | Cache large file reads (whitelists config files) |
-| `intercept-webfetch.py` | PreToolUse (WebFetch) | Fetch URLs, cache large responses |
-| `context-monitor.py` | UserPromptSubmit | Warn at configurable context usage thresholds |
-| `ccm-get.py` | -- | Retrieval tool with required filtering |
-| `lib/ccm_cache.py` | -- | Content-addressable cache (BLAKE2s dedup, zstd/gzip compression) |
-| `lib/common.py` | -- | Shared utilities (subagent detection, command classification) |
-| `config.py` | -- | All configuration |
+| Path                          | Role                                                       |
+| ----------------------------- | ---------------------------------------------------------- |
+| `hooks/intercept-bash.py`     | PreToolUse:Bash — wraps command in cache-wrap.py           |
+| `hooks/intercept-read.py`     | PreToolUse:Read — multimodal allowlist + edit-intent retry |
+| `hooks/intercept-grep.py`     | PreToolUse:Grep — block + redirect to `rg` via Bash        |
+| `hooks/intercept-glob.py`     | PreToolUse:Glob — block + redirect to `fd` via Bash        |
+| `hooks/intercept-webfetch.py` | PreToolUse:WebFetch — block + redirect to `curl` via Bash  |
+| `hooks/cache-wrap.py`         | Runs the inner command, caches+stubs above threshold       |
+| `hooks/ccm-get.py`            | Filtered cache retrieval (--grep/--head/--tail/--lines)    |
+| `hooks/lib/ccm_cache.py`      | Content-addressable cache (BLAKE2s, zstd/gzip)             |
 
-## Configuration
+## Environment variables
 
-After installation, edit `~/.claude/hooks/config.py`:
+| Var                     | Effect                                                  |
+| ----------------------- | ------------------------------------------------------- |
+| `CCH_DISABLE=1`         | All hooks pass through (debug escape hatch)             |
+| `CCH_CACHE_THRESHOLD`   | Bytes threshold for caching Bash output (default 8000)  |
 
-```python
-# Output thresholds (bytes) -- outputs larger than this get cached
-BASH_THRESHOLD = 8000    # ~2k tokens
-GLOB_THRESHOLD = 8000
-GREP_THRESHOLD = 8000
-READ_THRESHOLD = 25000   # ~6k tokens
-
-# Context monitor
-CONTEXT_MAX_TOKENS = 1000000         # 1M context window
-CONTEXT_WARN_THRESHOLDS = [70, 80, 90]  # Warn at these percentages
-```
-
-## Cache management
-
-Cached content lives in `~/.claude/cache/ccm/`:
+## Tests
 
 ```
-ccm/
-  blobs/<hash>.zst    # Compressed content
-  meta/<hash>.json    # Metadata (source, access count, pinning)
-  index.jsonl         # Append-only audit log
+python3 -m pytest tests/
 ```
 
-Content is deduplicated by BLAKE2s hash. Identical outputs produce the same cache key.
+## Dependencies
 
-```bash
-# List recent cache entries
-~/.claude/hooks/ccm-get.py --list
+User prerequisites (not auto-installed):
 
-# Show cache statistics
-~/.claude/hooks/ccm-get.py --stats
-
-# Show metadata for a key
-~/.claude/hooks/ccm-get.py <key> --info
-```
-
-## Bypass
-
-Set `CLAUDE_HOOKS_PASSTHROUGH=1` to temporarily disable all interception:
-
-```bash
-CLAUDE_HOOKS_PASSTHROUGH=1 claude
-```
-
-## Platform
-
-Linux only. The context monitor uses `/proc` for TTY detection. The hooks themselves should work on macOS but are untested.
-
-## Origin
-
-This project is a standalone extraction of the hook and caching components from [claude-context-manager](https://github.com/jimovonz/claude-context-manager). The original project included CLI patching, a thinking proxy daemon, external compaction routing, and session management -- all removed here in favour of a minimal, maintenance-free package.
+- Python 3.10+
+- Claude Code with `hookSpecificOutput.updatedInput` support
+- [RTK](https://github.com/rtk-ai/rtk) — for command compression
+- [Cairn](https://github.com/jimovonz/cairn) — for cross-session memory
+- Optional: `zstandard` (better cache compression), `tiktoken` (accurate
+  token counts in stubs)
 
 ## License
 
