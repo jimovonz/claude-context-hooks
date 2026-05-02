@@ -40,7 +40,7 @@ def test_install_registers_hooks(tmp_path):
         for e in settings['hooks']['PreToolUse']
         if any('intercept-' in h.get('command', '') for h in e.get('hooks', []))
     ]
-    assert set(matchers) == {'Bash', 'Read', 'Grep', 'Glob', 'WebFetch'}
+    assert set(matchers) == {'Bash', 'Read', 'Grep', 'Glob', 'WebFetch', 'Edit', 'Write', 'NotebookEdit'}
 
 
 def test_install_appends_after_existing_bash_hook(tmp_path):

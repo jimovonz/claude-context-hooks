@@ -1,46 +1,56 @@
 # claude-context-hooks
 
-**State: v2 redesign — design doc complete, no code yet.**
+**State: v2 maximally-clean — implemented and installed locally.
+GitHub `main` still shows v1; not yet pushed.**
 
 ## What this is
 
 Lightweight Claude Code hook layer that minimises tool-output context cost
 by **routing all data interaction through a single Bash data path**. Built-in
-tools (Read/Grep/Glob/WebFetch) are blocked with narrow allowances; Bash
-output is RTK-compressed and large residuals are cached for selective
-querying. Coexists with [RTK](https://github.com/rtk-ai/rtk) and
+tools (`Read`, `Grep`, `Glob`, `WebFetch`, `Edit`, `Write`, `NotebookEdit`)
+are blocked at the hook layer; `Read` of multimodal extensions is the only
+allowed built-in path because Bash has no equivalent. Bash output is
+RTK-compressed and large residuals cached for selective slice retrieval
+via `ccm-get.py`. Edits and writes go through `cch-edit` and `cch-write`
+helpers (Bash-routed) so the read-before-edit guard never fires.
+
+Coexists with [RTK](https://github.com/rtk-ai/rtk) and
 [Cairn](https://github.com/jimovonz/cairn). Personal-use focus.
 
 ## Source of truth
 
 [`docs/DESIGN.md`](docs/DESIGN.md) — purpose, single-data-path architecture,
-why built-ins are blocked, routing policy, components, non-goals, open
+why built-ins are blocked (including the read-before-edit token tax that
+forces writes to Bash), routing policy, components, non-goals, open
 questions. Read it before changing direction.
 
 ## Where we are right now
 
-- v1 (per-tool caching, `ccm-get.py` retrieval, deny-channel surfacing)
-  cleared from the working tree as staged deletions. **Not committed.**
-- v2 design captured in `docs/DESIGN.md`, `README.md`, this file. **Not
-  committed.**
-- Public GitHub repo `jimovonz/claude-context-hooks` still shows v1 until
-  the cutover is committed and pushed.
-- Stash `pre-repurpose snapshot of intercept-bash.py changes` holds v1
-  uncommitted edits. Recover with `git stash pop` if wanted, otherwise
-  `git stash drop`.
+- v2 maximally-clean implementation committed locally (`a20ca47` + the
+  follow-up DESIGN.md / tests commit).
+- All 78 tests pass.
+- RTK installed locally (v0.38.0, `~/.local/bin/rtk`); RTK's PreToolUse:Bash
+  hook ordered before our cache wrapper in `~/.claude/settings.json`.
+- Public GitHub repo `jimovonz/claude-context-hooks` still shows v1 — not
+  yet pushed.
+- Stash `pre-repurpose snapshot of intercept-bash.py changes` may still
+  hold v1 uncommitted edits. Drop with `git stash drop` if no longer
+  needed.
 
 ## Architecture in one breath
 
 Block built-in tools → all data goes through Bash → RTK compresses Bash →
 wrapper caches residual large output → `ccm-get.py` retrieves selectively.
-Cairn untouched.
+Edits and writes routed through `cch-edit` / `cch-write` helpers so the
+read-before-edit guard never fires. Cairn untouched.
 
 Two distinct mechanisms, two different jobs:
-- **Blocking** (Read/Grep/Glob/WebFetch) is the *routing* mechanism.
-  Funnels everything to Bash via deny+suggest. Not about caching.
+- **Blocking** (Read/Grep/Glob/WebFetch/Edit/Write/NotebookEdit) is the
+  *routing* mechanism. Funnels everything to Bash via deny+suggest.
+  Multimodal Read is the only structurally-irreplaceable built-in.
 - **Wrapping** (Bash) is the *caching* mechanism. Our PreToolUse:Bash
-  hook chains after RTK's: RTK rewrites first (`git status` → `rtk git
-  status`), our hook rewrites second (adds cache wrapper). Bash runs the
+  hook chains after RTK's: RTK rewrites first (`cat foo.py` → `rtk cat
+  foo.py`), our hook rewrites second (adds cache wrapper). Bash runs the
   doubly-wrapped command. Output flows through normal `tool_result` —
   inline if small, stub-with-key if large. No deny-channel abuse.
 
@@ -49,43 +59,35 @@ remove or replace it.
 
 ## Immediate next steps
 
-1. Resolve the open questions below (don't have to be perfect; pick a
-   direction).
-2. Commit the cutover (deletions + new `docs/DESIGN.md` + `README.md` +
-   this `CLAUDE.md`).
-3. Draft the routing-policy instruction snippet (text users add to their
-   own CLAUDE.md).
-4. Build `intercept-grep.py`, `intercept-glob.py`, `intercept-webfetch.py`
-   first — these are unconditional blocks with redirect, simplest to
-   implement.
-5. Decide and build `intercept-read.py` allowlist policy.
-6. Build the Bash cache wrapper and resolve the layering question with
-   RTK's hook (chain or replace).
-7. Carry over `lib/ccm_cache.py` and `ccm-get.py` from v1 (recover from
-   git history at commit `6013673`).
-8. `install.py` — symlink-based, registers hooks, verifies RTK present.
-9. Push to GitHub.
+1. Push to GitHub `main` (replaces v1 publicly). Tag `v2.0.0`.
+2. Update README to mention the write helpers and the read-before-edit
+   rationale (currently still v2-pre-helpers wording in places).
+3. Soak the design over real sessions — measure correction rate (target
+   ~1-2/session) and iterate the CLAUDE.md routing snippet wording.
+4. Optionally raise the cache threshold above 8KB once we see how often
+   small post-RTK Bash outputs trip it.
 
-## Open questions (resolve before coding)
+## Open questions
 
-- **Hook chaining protocol verification.** Design assumes Claude Code
-  fires multiple PreToolUse:Bash hooks in settings.json-declared order
-  with `updatedInput` propagating between them. Verify against Claude
-  Code hook docs before implementation. Fallback if it doesn't work
-  that way: replace RTK's hook with one of ours that calls `rtk rewrite`
-  as a subprocess and adds cache wrapping in a single hook.
-- **`intercept-read.py` allowlist.** Three candidates: multimodal-only
-  (deny everything else, two-strike for Edit workflows); always-allow with
-  `limit` injection (trust instruction); track Edit history per-session
-  and allow Read on Edit-touched files.
-- **Cache threshold.** v1 used 8KB. After RTK compression, may need
-  raising to avoid caching small outputs that don't benefit.
+- **Cache threshold.** v1 used 8KB. After RTK compression, typical Bash
+  output is small enough that 8KB may be too low — threshold may need
+  raising to avoid caching things that don't need it.
 - **CLAUDE.md instruction snippet wording.** Iterate against real use.
+  The current snippet covers helpers (`cch-edit`, `cch-write`) and the
+  unconditional block on Edit/Write/NotebookEdit; correction rate from
+  real sessions will tell us whether the helper syntax needs more
+  prominence or worked-example flow.
+
+(Resolved during build: hook chaining protocol — empirically works for
+RTK + cch on Bash; intercept-read.py allowlist — multimodal-only with
+writes via Bash helpers, no two-strike or reason-gate needed.)
 
 ## Acceptance signal
 
 Routing works when ~1–2 corrections per session is the steady-state rate.
-Below that, enforcement is too lax; above, it's too aggressive.
+Below that, enforcement is too lax; above, it's too aggressive. Cold-start
+sessions naturally see more before the CLAUDE.md routing snippet
+internalises.
 
 ## Dependencies (user prerequisite, not auto-installed)
 
@@ -96,16 +98,19 @@ Below that, enforcement is too lax; above, it's too aggressive.
 
 ## Coexistence rules (do not violate)
 
-| Surface              | Owner                                            |
-| -------------------- | ------------------------------------------------ |
-| `PreToolUse:Bash`    | RTK (rewrite, fires first) → this project (cache wrapper, fires second) |
-| `PreToolUse:Read`    | this project (block + narrow allowlist)          |
-| `PreToolUse:Grep`    | this project (block + redirect to `rg` via Bash) |
-| `PreToolUse:Glob`    | this project (block + redirect to `fd` via Bash) |
-| `PreToolUse:WebFetch`| this project (block + redirect to `curl` via Bash)|
-| `UserPromptSubmit`   | Cairn (do not touch)                             |
-| `Stop`               | Cairn (do not touch)                             |
-| `PostToolUse`        | unused (do not introduce without strong reason)  |
+| Surface                       | Owner                                                                   |
+| ----------------------------- | ----------------------------------------------------------------------- |
+| `PreToolUse:Bash`             | RTK (rewrite, fires first) → this project (cache wrapper, fires second) |
+| `PreToolUse:Read`             | this project (block + multimodal allowlist)                             |
+| `PreToolUse:Grep`             | this project (block + redirect to `rg` via Bash)                        |
+| `PreToolUse:Glob`             | this project (block + redirect to `fd` via Bash)                        |
+| `PreToolUse:WebFetch`         | this project (block + redirect to `curl` via Bash)                      |
+| `PreToolUse:Edit`             | this project (block + redirect to `cch-edit` via Bash)                  |
+| `PreToolUse:Write`            | this project (block + redirect to `cch-write` via Bash)                 |
+| `PreToolUse:NotebookEdit`     | this project (block + redirect to `cch-edit` / `jq` via Bash)           |
+| `UserPromptSubmit`            | Cairn (do not touch)                                                    |
+| `Stop`                        | Cairn (do not touch)                                                    |
+| `PostToolUse`                 | unused (do not introduce without strong reason)                         |
 
 ## Don't reintroduce v1's mistakes
 
@@ -118,3 +123,11 @@ v1's caching was right; v1's *application* of caching was wrong:
 If you find yourself wanting to add a per-tool cache for Read, Grep,
 etc., or surface anything via `permissionDecision: deny` as a result
 channel — stop. That's v1's path.
+
+Don't reintroduce v2's first-pass mistakes either:
+- Two-strike Read for "Edit-intent" — leaks: model learns double-tap
+  always works, defeats Bash routing. Replaced by the `cch-edit`
+  helper which removes the read-before-edit coupling entirely.
+- Reason-gate via Read tool input — structurally impossible because
+  Read's tool schema has `additionalProperties: false`; constrained
+  generation strips unknown fields before the hook ever sees them.

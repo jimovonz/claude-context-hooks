@@ -1,6 +1,5 @@
-"""Tests for intercept-read.py — multimodal allowlist + two-strike Edit-intent."""
+"""Tests for intercept-read.py — multimodal-only allowlist, no two-strike."""
 
-import time
 from pathlib import Path
 
 import pytest
@@ -26,48 +25,52 @@ def test_multimodal_allowed(run_hook, path):
     assert out == {}
 
 
-def test_text_file_denied_first_attempt(run_hook):
-    rc, out, err = run_hook(HOOK, _payload('/x/foo.py'))
+@pytest.mark.parametrize('path', [
+    '/x/foo.py', '/x/foo.md', '/x/foo.ts', '/x/foo.json',
+    '/x/foo.yaml', '/x/foo', '/x/CMakeLists.txt',
+])
+def test_text_file_denied(run_hook, path):
+    rc, out, err = run_hook(HOOK, _payload(path))
     assert isinstance(out, dict)
     deny = out['hookSpecificOutput']
+    assert deny['hookEventName'] == 'PreToolUse'
     assert deny['permissionDecision'] == 'deny'
-    assert 'Bash' in deny['permissionDecisionReason']
-    assert '/x/foo.py' in deny['permissionDecisionReason']
+    reason = deny['permissionDecisionReason']
+    assert path in reason
+    assert 'cat' in reason
+    assert 'cch-edit' in reason
 
 
-def test_text_file_allowed_on_retry(run_hook):
+def test_no_two_strike(run_hook):
+    """Repeated Reads of the same path stay denied — no two-strike escape."""
     payload = _payload('/x/foo.py')
-    rc1, out1, _ = run_hook(HOOK, payload)
-    assert out1['hookSpecificOutput']['permissionDecision'] == 'deny'
-    # Same path, same session, within window → allow
-    rc2, out2, _ = run_hook(HOOK, payload)
-    assert out2 == {}
-
-
-def test_different_sessions_independent(run_hook):
-    rc1, out1, _ = run_hook(HOOK, _payload('/x/foo.py', session='sess-1'))
-    assert out1['hookSpecificOutput']['permissionDecision'] == 'deny'
-    # Different session → first attempt denied separately
-    rc2, out2, _ = run_hook(HOOK, _payload('/x/foo.py', session='sess-2'))
-    assert out2['hookSpecificOutput']['permissionDecision'] == 'deny'
-
-
-def test_third_attempt_denied_again(run_hook):
-    """After Edit-intent retry consumes the credit, next read of same path
-    is denied again — so a re-Read after editing still routes through Bash."""
-    payload = _payload('/x/foo.py')
-    run_hook(HOOK, payload)              # deny
-    rc2, out2, _ = run_hook(HOOK, payload)  # allow (edit-intent)
-    assert out2 == {}
-    rc3, out3, _ = run_hook(HOOK, payload)  # deny again
-    assert out3['hookSpecificOutput']['permissionDecision'] == 'deny'
+    for _ in range(3):
+        rc, out, err = run_hook(HOOK, payload)
+        assert out['hookSpecificOutput']['permissionDecision'] == 'deny'
 
 
 def test_no_file_path_allowed(run_hook):
+    """Hook does not deny when file_path is absent — defensive default."""
     rc, out, err = run_hook(HOOK, {'tool_input': {}})
     assert out == {}
 
 
-def test_disable_env_var(run_hook):
+def test_disable_env_var_passes_through(run_hook):
     rc, out, err = run_hook(HOOK, _payload('/x/foo.py'), env={'CCH_DISABLE': '1'})
     assert out == {}
+
+
+def test_malformed_stdin_passes_through(run_hook, tmp_path):
+    """Hook is fail-open on JSON parse error so a buggy invocation does
+    not block all Reads."""
+    import json, os, subprocess, sys
+    proc = subprocess.run(
+        [sys.executable, str(HOOK)],
+        input=b'not-json',
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        env={**os.environ, 'HOME': str(tmp_path)},
+        timeout=10,
+    )
+    out = proc.stdout.decode().strip()
+    assert out in ('{}', '')
