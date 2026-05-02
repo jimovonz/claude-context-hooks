@@ -12,6 +12,11 @@ do not trigger the guard, and the helper provides atomic writes
 import json
 import os
 import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).parent))
+
+from lib.event_log import log_event
 
 REASON = (
     "Built-in Write denied — routes through Bash via cch-write to avoid\n"
@@ -60,6 +65,11 @@ def main() -> int:
         return _allow()
 
     file_path = (data.get('tool_input') or {}).get('file_path', '<path>')
+    try:
+        st_size = os.stat(file_path).st_size
+    except OSError:
+        st_size = 0
+    log_event('deny_write', path=file_path, st_size_existing=st_size)
     return _deny(REASON.format(path=file_path))
 
 

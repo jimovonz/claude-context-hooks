@@ -14,6 +14,11 @@ uniqueness check, atomic write, diff output).
 import json
 import os
 import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).parent))
+
+from lib.event_log import log_event
 
 REASON = (
     "Built-in Edit denied — routes through Bash via cch-edit to avoid\n"
@@ -59,6 +64,11 @@ def main() -> int:
         return _allow()
 
     file_path = (data.get('tool_input') or {}).get('file_path', '<path>')
+    try:
+        st_size = os.stat(file_path).st_size
+    except OSError:
+        st_size = 0
+    log_event('deny_edit', path=file_path, st_size=st_size)
     return _deny(REASON.format(path=file_path))
 
 

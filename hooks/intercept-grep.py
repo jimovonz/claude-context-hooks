@@ -7,6 +7,11 @@ through the cache-wrap pipeline.
 import json
 import os
 import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).parent))
+
+from lib.event_log import log_event
 
 REASON = (
     "Use Bash with ripgrep instead so output is RTK-compressed and cached. "
@@ -25,9 +30,11 @@ def main() -> int:
         sys.stdout.write('{}\n')
         return 0
     try:
-        json.load(sys.stdin)
+        data = json.load(sys.stdin)
     except json.JSONDecodeError:
-        pass
+        data = {}
+    ti = data.get('tool_input') or {}
+    log_event('deny_grep', pattern=str(ti.get('pattern', ''))[:80], path=ti.get('path', ''))
     response = {
         'hookSpecificOutput': {
             'hookEventName': 'PreToolUse',

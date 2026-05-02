@@ -78,3 +78,15 @@ def test_no_temp_leak_on_success(tmp_path):
     assert rc == 0
     leftovers = list(tmp_path.glob('*.cch-tmp'))
     assert leftovers == []
+
+
+def test_overwrite_preserves_executable_mode(tmp_path):
+    """cch-write overwriting an existing executable file must preserve
+    its mode bits. Regression against the same 2026-05-02 incident."""
+    target = tmp_path / 's.sh'
+    target.write_text('#!/bin/sh\noriginal\n')
+    target.chmod(0o755)
+    rc, out, err = _run(str(target), stdin=b'#!/bin/sh\nupdated\n')
+    assert rc == 0
+    mode = target.stat().st_mode & 0o777
+    assert mode == 0o755, f'expected 0o755, got {oct(mode)}'

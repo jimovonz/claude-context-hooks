@@ -26,6 +26,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent))
 
 from lib.ccm_cache import init_ccm_cache, store_content, build_ccm_stub
+from lib.event_log import log_event
 
 # Threshold for caching. After RTK compression typical Bash output is
 # small; raise this if it caches too eagerly.
@@ -63,6 +64,14 @@ def main() -> int:
 
     if len(stdout_bytes) <= CACHE_THRESHOLD_BYTES:
         # Inline: write through unchanged.
+        log_event(
+            'cache_wrap',
+            cmd_head=inner[:60],
+            original_bytes=len(stdout_bytes),
+            stub_bytes=None,
+            cached=False,
+            threshold=CACHE_THRESHOLD_BYTES,
+        )
         sys.stdout.buffer.write(stdout_bytes)
         sys.stdout.flush()
         return exit_code
@@ -98,7 +107,17 @@ def main() -> int:
         f'Retrieve: ccm-get.py {key} '
         '[--grep PATTERN] [--head N] [--tail N] [--lines A-B]'
     )
-    sys.stdout.write(stub + '\n' + retrieve_hint + '\n')
+    full_emit = stub + '\n' + retrieve_hint + '\n'
+    log_event(
+        'cache_wrap',
+        cmd_head=inner[:60],
+        original_bytes=len(stdout_bytes),
+        stub_bytes=len(full_emit.encode('utf-8')),
+        cached=True,
+        cache_key=key,
+        threshold=CACHE_THRESHOLD_BYTES,
+    )
+    sys.stdout.write(full_emit)
     sys.stdout.flush()
     return exit_code
 

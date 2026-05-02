@@ -17,6 +17,11 @@ Edit notebooks via Bash:
 import json
 import os
 import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).parent))
+
+from lib.event_log import log_event
 
 REASON = (
     "Built-in NotebookEdit denied — notebooks are large (embedded output\n"
@@ -64,6 +69,11 @@ def main() -> int:
 
     file_path = (data.get('tool_input') or {}).get('notebook_path') \
         or (data.get('tool_input') or {}).get('file_path', '<path>')
+    try:
+        st_size = os.stat(file_path).st_size
+    except OSError:
+        st_size = 0
+    log_event('deny_notebookedit', path=file_path, st_size=st_size)
     return _deny(REASON.format(path=file_path))
 
 

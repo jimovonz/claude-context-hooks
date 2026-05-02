@@ -21,6 +21,10 @@ import os
 import sys
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).parent))
+
+from lib.event_log import log_event
+
 MULTIMODAL_EXTS = {
     '.png', '.jpg', '.jpeg', '.gif', '.webp', '.bmp',
     '.pdf', '.ipynb', '.svg',
@@ -86,6 +90,11 @@ def main() -> int:
     if _is_multimodal(file_path):
         return _allow()
 
+    try:
+        st_size = os.stat(file_path).st_size
+    except OSError:
+        st_size = 0
+    log_event('deny_read', path=file_path, st_size=st_size)
     return _deny(REASON_TEMPLATE.format(path=file_path))
 
 

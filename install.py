@@ -58,6 +58,8 @@ HOOK_FILES = [
     'ccm-get.py',
     'lib/__init__.py',
     'lib/ccm_cache.py',
+    'lib/event_log.py',
+    'cch-gain.py',
 ]
 
 # Helpers also symlinked into ~/.local/bin/ so the model can invoke
@@ -69,6 +71,7 @@ BIN_FILES = [
     'cch-edit.py',
     'cch-write.py',
     'ccm-get.py',
+    'cch-gain.py',
 ]
 
 # settings.json structure. PreToolUse:Bash is appended (not replacing

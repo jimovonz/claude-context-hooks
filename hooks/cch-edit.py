@@ -86,7 +86,9 @@ def main() -> int:
 
     tmp = target.with_name(target.name + '.cch-tmp')
     try:
+        target_mode = target.stat().st_mode
         tmp.write_text(updated)
+        os.chmod(tmp, target_mode)
         os.replace(tmp, target)
     except OSError as e:
         if tmp.exists():

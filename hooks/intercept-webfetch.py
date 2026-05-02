@@ -7,6 +7,11 @@ through the cache-wrap pipeline.
 import json
 import os
 import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).parent))
+
+from lib.event_log import log_event
 
 REASON = (
     "Use Bash with curl instead so output is RTK-compressed and cached. "
@@ -24,9 +29,11 @@ def main() -> int:
         sys.stdout.write('{}\n')
         return 0
     try:
-        json.load(sys.stdin)
+        data = json.load(sys.stdin)
     except json.JSONDecodeError:
-        pass
+        data = {}
+    url = (data.get('tool_input') or {}).get('url', '')
+    log_event('deny_webfetch', url=url[:200])
     response = {
         'hookSpecificOutput': {
             'hookEventName': 'PreToolUse',

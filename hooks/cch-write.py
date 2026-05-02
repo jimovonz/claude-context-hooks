@@ -46,7 +46,10 @@ def main() -> int:
 
     tmp = target.with_name(target.name + '.cch-tmp')
     try:
+        existing_mode = target.stat().st_mode if target.exists() else None
         tmp.write_bytes(content)
+        if existing_mode is not None:
+            os.chmod(tmp, existing_mode)
         os.replace(tmp, target)
     except OSError as e:
         if tmp.exists():

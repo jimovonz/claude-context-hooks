@@ -103,3 +103,16 @@ def test_atomic_no_partial_on_error(tmp_path):
     assert rc == 0
     leftovers = list(tmp_path.glob('*.cch-tmp'))
     assert leftovers == []
+
+
+def test_preserves_executable_mode(tmp_path):
+    """cch-edit must NOT strip the executable bit on edit. Regression
+    against the 2026-05-02 incident where editing cache-wrap.py via
+    cch-edit dropped 0775 to 0664 and broke the entire Bash chain."""
+    target = tmp_path / 't.sh'
+    target.write_text('#!/bin/sh\necho hello\n')
+    target.chmod(0o755)
+    rc, out, err = _run(str(target), 'hello', 'goodbye')
+    assert rc == 0
+    mode = target.stat().st_mode & 0o777
+    assert mode == 0o755, f'expected 0o755, got {oct(mode)}'
