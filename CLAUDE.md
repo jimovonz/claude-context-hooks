@@ -1,7 +1,9 @@
 # claude-context-hooks
 
-**State: v2 maximally-clean — implemented and installed locally.
-GitHub `main` still shows v1; not yet pushed.**
+**State: v2.0.0 shipped 2026-05-02.**
+Tagged `v2.0.0` on commit `e192fa6`, pushed to
+[`jimovonz/claude-context-hooks`](https://github.com/jimovonz/claude-context-hooks).
+Installed locally and operational.
 
 ## What this is
 
@@ -26,16 +28,21 @@ questions. Read it before changing direction.
 
 ## Where we are right now
 
-- v2 maximally-clean implementation committed locally (`a20ca47` + the
-  follow-up DESIGN.md / tests commit).
-- All 78 tests pass.
+- v2.0.0 tagged at `e192fa6`, pushed to GitHub `main`.
+- All 83 tests pass.
+- Installed locally: 14 symlinks in `~/.claude/hooks/`, 3 helper
+  symlinks in `~/.local/bin/` (`cch-edit.py`, `cch-write.py`,
+  `ccm-get.py`), 8 PreToolUse entries in `~/.claude/settings.json`.
+- Live smoke test 2026-05-02 confirmed: RTK rewrite + cache stub +
+  `ccm-get.py` slice retrieval + bare helper invocation + deny+redirect
+  on Read/WebFetch/Write all work. Edit deny is shadowed by the harness
+  read-before-edit guard but net effect (Edit unusable, must use
+  `cch-edit.py`) is identical.
 - RTK installed locally (v0.38.0, `~/.local/bin/rtk`); RTK's PreToolUse:Bash
   hook ordered before our cache wrapper in `~/.claude/settings.json`.
-- Public GitHub repo `jimovonz/claude-context-hooks` still shows v1 — not
-  yet pushed.
-- Stash `pre-repurpose snapshot of intercept-bash.py changes` may still
-  hold v1 uncommitted edits. Drop with `git stash drop` if no longer
-  needed.
+- Stash `pre-repurpose snapshot of intercept-bash.py changes` (`stash@{0}`)
+  still present — pre-v2 snapshot of `intercept-bash.py`. Safe to drop
+  with `git stash drop stash@{0}` once you've confirmed v2 is solid.
 
 ## Architecture in one breath
 
@@ -59,13 +66,14 @@ remove or replace it.
 
 ## Immediate next steps
 
-1. Push to GitHub `main` (replaces v1 publicly). Tag `v2.0.0`.
-2. Update README to mention the write helpers and the read-before-edit
-   rationale (currently still v2-pre-helpers wording in places).
-3. Soak the design over real sessions — measure correction rate (target
+1. Soak the design over real sessions — measure correction rate (target
    ~1-2/session) and iterate the CLAUDE.md routing snippet wording.
-4. Optionally raise the cache threshold above 8KB once we see how often
+2. Optionally raise the cache threshold above 8KB once we see how often
    small post-RTK Bash outputs trip it.
+3. Re-run `rtk discover --since 7` after a week of v2 use to confirm
+   coverage rose well above the 2.9% pre-install baseline.
+4. Sanity-check README still describes the v2 shape (helpers, PATH
+   exposure via `~/.local/bin`, read-before-edit rationale).
 
 ## Open questions
 
@@ -80,7 +88,10 @@ remove or replace it.
 
 (Resolved during build: hook chaining protocol — empirically works for
 RTK + cch on Bash; intercept-read.py allowlist — multimodal-only with
-writes via Bash helpers, no two-strike or reason-gate needed.)
+writes via Bash helpers, no two-strike or reason-gate needed; helpers
+on PATH — installer now symlinks `cch-edit.py` / `cch-write.py` /
+`ccm-get.py` into `~/.local/bin/` collision-safely so bare
+invocation works.)
 
 ## Acceptance signal
 
