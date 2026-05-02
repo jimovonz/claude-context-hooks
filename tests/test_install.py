@@ -168,6 +168,63 @@ def test_remove_deletes_claude_md_when_only_our_block(tmp_path):
     assert not (tmp_path / '.claude' / 'CLAUDE.md').exists()
 
 
+def test_install_creates_bin_symlinks(tmp_path):
+    rc, out, err = _run([], tmp_path)
+    assert rc == 0
+    bin_dst = tmp_path / '.local' / 'bin'
+    for name in ('cch-edit.py', 'cch-write.py', 'ccm-get.py'):
+        link = bin_dst / name
+        assert link.is_symlink(), f'{name} missing from {bin_dst}'
+        assert link.resolve() == (REPO_ROOT / 'hooks' / name).resolve()
+
+
+def test_install_bin_symlinks_idempotent(tmp_path):
+    _run([], tmp_path)
+    _run([], tmp_path)
+    bin_dst = tmp_path / '.local' / 'bin'
+    # Still exactly one of each, still pointing into the repo
+    for name in ('cch-edit.py', 'cch-write.py', 'ccm-get.py'):
+        link = bin_dst / name
+        assert link.is_symlink()
+        assert link.resolve() == (REPO_ROOT / 'hooks' / name).resolve()
+
+
+def test_install_preserves_existing_bin_collision(tmp_path):
+    """If the user has a script with the same name, do NOT clobber it."""
+    bin_dst = tmp_path / '.local' / 'bin'
+    bin_dst.mkdir(parents=True)
+    user_script = bin_dst / 'cch-edit.py'
+    user_script.write_text('#!/bin/sh\necho user-owned\n')
+    user_script.chmod(0o755)
+    rc, out, err = _run([], tmp_path)
+    assert rc == 0
+    # Still a regular file, not our symlink
+    assert user_script.is_file()
+    assert not user_script.is_symlink()
+    assert 'user-owned' in user_script.read_text()
+
+
+def test_remove_strips_bin_symlinks(tmp_path):
+    _run([], tmp_path)
+    _run(['--remove'], tmp_path)
+    bin_dst = tmp_path / '.local' / 'bin'
+    for name in ('cch-edit.py', 'cch-write.py', 'ccm-get.py'):
+        assert not (bin_dst / name).exists(), f'{name} not removed'
+
+
+def test_remove_preserves_user_script_in_bin(tmp_path):
+    """--remove must NOT delete a user-owned file with a colliding name."""
+    bin_dst = tmp_path / '.local' / 'bin'
+    bin_dst.mkdir(parents=True)
+    user_script = bin_dst / 'cch-edit.py'
+    user_script.write_text('#!/bin/sh\necho user-owned\n')
+    user_script.chmod(0o755)
+    _run([], tmp_path)
+    _run(['--remove'], tmp_path)
+    assert user_script.is_file()
+    assert 'user-owned' in user_script.read_text()
+
+
 def test_check_only(tmp_path):
     rc, out, err = _run(['--check'], tmp_path)
     assert rc == 0

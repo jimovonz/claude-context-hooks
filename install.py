@@ -32,6 +32,7 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parent
 HOOKS_SRC = REPO_ROOT / 'hooks'
 HOOKS_DST = Path.home() / '.claude' / 'hooks'
+BIN_DST = Path.home() / '.local' / 'bin'
 SETTINGS_FILE = Path.home() / '.claude' / 'settings.json'
 CLAUDE_MD = Path.home() / '.claude' / 'CLAUDE.md'
 SNIPPET_FILE = REPO_ROOT / 'docs' / 'CLAUDE_MD_SNIPPET.md'
@@ -57,6 +58,17 @@ HOOK_FILES = [
     'ccm-get.py',
     'lib/__init__.py',
     'lib/ccm_cache.py',
+]
+
+# Helpers also symlinked into ~/.local/bin/ so the model can invoke
+# them bare (`cch-edit.py PATH old new`) without absolute paths.
+# These are installed only into BIN_DST; the canonical copies live in
+# HOOKS_DST. We never overwrite an existing entry that points elsewhere
+# (could be the user's own script with a colliding name).
+BIN_FILES = [
+    'cch-edit.py',
+    'cch-write.py',
+    'ccm-get.py',
 ]
 
 # settings.json structure. PreToolUse:Bash is appended (not replacing
@@ -86,6 +98,14 @@ def preflight() -> dict:
     checks['python_310'] = (
         py_ok,
         f'python {sys.version.split()[0]}'
+    )
+    path_dirs = os.environ.get('PATH', '').split(os.pathsep)
+    bin_on_path = str(BIN_DST) in path_dirs
+    checks['bin_on_path'] = (
+        bin_on_path,
+        f'{BIN_DST} on PATH — helpers (cch-edit.py, cch-write.py, ccm-get.py) invokable bare'
+        if bin_on_path else
+        f'{BIN_DST} not on PATH — add it to your shell rc, or invoke helpers via absolute path'
     )
     if SETTINGS_FILE.exists():
         try:
@@ -140,6 +160,64 @@ def install_files() -> int:
         n += 1
         print(f'  LINK {f} -> {src}')
     print(f'\n  {n} files symlinked into {HOOKS_DST}')
+    return n
+
+
+def install_bin_symlinks() -> int:
+    """Symlink helper scripts into ~/.local/bin so they're invokable bare.
+
+    Idempotent. If a name already exists in BIN_DST and is NOT a symlink
+    pointing to our repo, leave it alone and warn — could be the user's
+    own script with a colliding name.
+    """
+    BIN_DST.mkdir(parents=True, exist_ok=True)
+    n = 0
+    for f in BIN_FILES:
+        src = (HOOKS_SRC / f).resolve()
+        dst = BIN_DST / f
+        if not src.exists():
+            print(f'  SKIP {f} (source missing)')
+            continue
+        if dst.is_symlink():
+            try:
+                if dst.resolve() == src:
+                    print(f'  SKIP {f} (already linked)')
+                    continue
+            except OSError:
+                pass
+            dst.unlink()
+        elif dst.exists():
+            print(f'  SKIP {f} (exists in {BIN_DST} but not our symlink — left in place)')
+            continue
+        os.symlink(src, dst)
+        n += 1
+        print(f'  LINK {BIN_DST}/{f} -> {src}')
+    print(f'\n  {n} helper(s) exposed on PATH via {BIN_DST}')
+    return n
+
+
+def remove_bin_symlinks() -> int:
+    n = 0
+    if not BIN_DST.is_dir():
+        return 0
+    for f in BIN_FILES:
+        dst = BIN_DST / f
+        if not dst.is_symlink():
+            continue
+        try:
+            target = dst.resolve()
+        except OSError:
+            continue
+        # Only remove symlinks that point into our repo. Never touch a
+        # user-owned file with the same name.
+        try:
+            target.relative_to(REPO_ROOT)
+        except ValueError:
+            print(f'  SKIP {BIN_DST}/{f} (symlink target outside repo — left in place)')
+            continue
+        dst.unlink()
+        n += 1
+        print(f'  UNLINK {BIN_DST}/{f}')
     return n
 
 
@@ -241,6 +319,10 @@ def remove() -> None:
         lib_dir.rmdir()
         print('  RMDIR lib/')
 
+    removed_bin = remove_bin_symlinks()
+    if removed_bin:
+        print(f'  Removed {removed_bin} helper symlink(s) from {BIN_DST}')
+
     if not SETTINGS_FILE.exists():
         print('\n  No settings.json found')
         return
@@ -288,6 +370,8 @@ def main() -> int:
         return 1
     print()
     install_files()
+    print()
+    install_bin_symlinks()
     print()
     merge_settings()
     if '--no-instructions' not in sys.argv:
