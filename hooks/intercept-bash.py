@@ -38,46 +38,83 @@ PASSTHROUGH_MARKERS = (
 )
 
 
-_SYMBOL_GREP_RE = re.compile(
-    r"""(?:grep|rg)\b.*(?:"""
-    r"""'def\s+(\w+)'|"def\s+(\w+)"|"""
-    r"""'class\s+(\w+)'|"class\s+(\w+)")"""
+# Definition keywords across languages
+_DEF_KEYWORDS = (
+    r"def|class|function|fn|func|type|interface|struct|enum|trait|impl|module"
 )
 
+# Pattern categories: (compiled_regex, redirect_type)
+_PATTERNS = [
+    # 1. Symbol definition: grep 'def foo' / grep "class Bar" / etc.
+    (re.compile(
+        rf"""(?:grep|rg)\b.*(?:'|")(?:{_DEF_KEYWORDS})\s+(\w+)(?:'|")"""
+    ), "location"),
+    # 2. Caller search: grep 'foo(' or grep '\.foo('
+    (re.compile(
+        r"""(?:grep|rg)\b.*(?:'|")\\?\.?(\w{2,})\((?:'|")"""
+    ), "callers"),
+    # 3. Test discovery: grep 'test_foo' or grep 'def test_'
+    (re.compile(
+        r"""(?:grep|rg)\b.*(?:'|")(?:def\s+)?(test_\w+)(?:'|")"""
+    ), "tests"),
+    # 4. Import tracing: grep 'from foo import' or grep 'import foo'
+    (re.compile(
+        r"""(?:grep|rg)\b.*(?:'|")(?:from\s+(\w+)\s+import|import\s+(\w+))(?:'|")"""
+    ), "callees"),
+]
+
 _SESSION_MARKER = Path(tempfile.gettempdir()) / f"cch-graph-redirected-{os.getppid()}"
+
+_REDIRECT_TEMPLATES = {
+    "location": (
+        "Symbol definition lookup detected. Use cairn-graph instead of grep:\\n"
+        "  cairn-graph --location {symbol}    # exact file:line\\n"
+        "  cairn-graph --callers {symbol}     # what calls it\\n"
+        "  cairn-graph --impact {symbol}      # blast radius\\n"
+        "Graph queries are faster (<15ms) and more precise than grep."
+    ),
+    "callers": (
+        "Caller search detected. Use cairn-graph instead of grep:\\n"
+        "  cairn-graph --callers {symbol}     # all call sites\\n"
+        "  cairn-graph --impact {symbol}      # blast radius\\n"
+        "Graph queries find callers precisely via AST, not string matching."
+    ),
+    "tests": (
+        "Test lookup detected. Use cairn-graph instead of grep:\\n"
+        "  cairn-graph --tests {symbol}       # TESTED_BY edges\\n"
+        "  cairn-graph --location {symbol}    # exact test location\\n"
+        "Graph queries resolve test relationships, not just name matches."
+    ),
+    "callees": (
+        "Import/dependency lookup detected. Use cairn-graph instead of grep:\\n"
+        "  cairn-graph --callees {symbol}     # what it calls/imports\\n"
+        "  cairn-graph --location {symbol}    # where it lives\\n"
+        "Graph queries trace dependencies via AST edges."
+    ),
+}
 
 
 def _check_symbol_grep(cmd: str) -> str | None:
     """Detect grep-for-symbol patterns. Returns redirect message or None.
     Only fires once per session (marker file tracks).
     """
-    # Skip if graph.db unlikely to exist (cairn-graph not on PATH)
     if not shutil.which("cairn-graph"):
         return None
 
-    # Once per session: skip if already redirected
     if _SESSION_MARKER.exists():
         return None
 
-    m = _SYMBOL_GREP_RE.search(cmd)
-    if not m:
-        return None
+    for pattern, redirect_type in _PATTERNS:
+        m = pattern.search(cmd)
+        if m:
+            symbol = next(g for g in m.groups() if g is not None)
+            try:
+                _SESSION_MARKER.touch()
+            except OSError:
+                pass
+            return _REDIRECT_TEMPLATES[redirect_type].format(symbol=symbol)
 
-    symbol = next(g for g in m.groups() if g is not None)
-
-    # Mark as redirected for this session
-    try:
-        _SESSION_MARKER.touch()
-    except OSError:
-        pass
-
-    return (
-        f"Symbol lookup detected. Use cairn-graph instead of grep:\\n"
-        f"  cairn-graph --location {symbol}    # exact file:line\\n"
-        f"  cairn-graph --callers {symbol}     # what calls it\\n"
-        f"  cairn-graph --impact {symbol}      # blast radius\\n"
-        f"Graph queries are faster (<15ms) and more precise than grep."
-    )
+    return None
 
 
 def should_skip_wrap(cmd: str) -> bool:
