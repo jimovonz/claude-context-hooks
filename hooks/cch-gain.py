@@ -27,6 +27,7 @@ Usage:
   cch-gain.py --days 7
   cch-gain.py --since 2026-04-01
   cch-gain.py --json          # machine-readable
+  cch-gain.py --dist          # cache_wrap original_bytes histogram + threshold trial
 """
 
 import argparse
@@ -203,11 +204,72 @@ def render_text(agg, since: datetime, days: int) -> str:
     return '\n'.join(out)
 
 
+BUCKETS = [
+    ('<0.5kB ', 0,     500),
+    ('0.5-1kB', 500,   1000),
+    ('1-2kB  ', 1000,  2000),
+    ('2-4kB  ', 2000,  4000),
+    ('4-6kB  ', 4000,  6000),
+    ('6-8kB  ', 6000,  8000),
+    ('8-16kB ', 8000,  16000),
+    ('>16kB  ', 16000, float('inf')),
+]
+
+CANDIDATE_THRESHOLDS = [500, 1000, 2000, 4000, 8000, 16000]
+
+
+def render_dist(since: datetime, days: int) -> str:
+    sizes = []
+    for row in _read_jsonl(EVENTS_LOG):
+        if _parse_ts(row.get('ts', '')) < since:
+            continue
+        if row.get('event') != 'cache_wrap':
+            continue
+        n = row.get('original_bytes', 0) or 0
+        sizes.append(n)
+
+    out = []
+    header = f'Cache wrapper distribution (since {since.date().isoformat()}, {days}d window)'
+    out.append(header)
+    out.append('=' * len(header))
+
+    if not sizes:
+        out.append('No cache_wrap events in window — run more sessions and retry.')
+        return '\n'.join(out)
+
+    n = len(sizes)
+    out.append(f'n = {n} events, sum = {sum(sizes) / 1024:.1f} kB, '
+               f'avg = {sum(sizes) // n} B, max = {max(sizes)} B')
+    out.append('')
+    out.append(f'  {"Bucket":<10} {"Count":>5}  {"%":>6}  bar')
+    for label, lo, hi in BUCKETS:
+        c = sum(1 for s in sizes if lo <= s < hi)
+        pct = 100 * c / n
+        bar = '#' * c if c < 60 else '#' * 60 + f' (+{c-60})'
+        out.append(f'  {label:<10} {c:>5}  {pct:>5.1f}%  {bar}')
+
+    out.append('')
+    out.append('Threshold trial — outputs that WOULD be cached at each candidate:')
+    out.append(f'  {"threshold":<14} {"would-cache":>11}  {"%":>6}')
+    for t in CANDIDATE_THRESHOLDS:
+        c = sum(1 for s in sizes if s > t)
+        pct = 100 * c / n
+        marker = '   <-- current default' if t == 8000 else ''
+        out.append(f'  >{t:>5} bytes    {c:>11}  {pct:>5.1f}%{marker}')
+
+    out.append('')
+    out.append('Pick a threshold near the floor of where slice-retrieval beats inline.')
+    out.append('Stub overhead ~150 bytes, so caching outputs <500B is always net-negative.')
+    out.append('Set via env: export CCH_CACHE_THRESHOLD=<bytes>')
+    return '\n'.join(out)
+
+
 def main() -> int:
     p = argparse.ArgumentParser(prog='cch-gain', description='Token-savings report for claude-context-hooks')
     p.add_argument('--days', type=int, default=30, help='Window in days (default 30)')
     p.add_argument('--since', help='ISO date, overrides --days')
     p.add_argument('--json', action='store_true', help='Emit JSON instead of text report')
+    p.add_argument('--dist', action='store_true', help='Print cache_wrap original_bytes histogram + threshold trial')
     args = p.parse_args()
 
     if args.since:
@@ -220,6 +282,28 @@ def main() -> int:
     else:
         since = datetime.now() - timedelta(days=args.days)
         days = args.days
+
+    if args.dist and args.json:
+        # JSON form of the histogram
+        sizes = []
+        for row in _read_jsonl(EVENTS_LOG):
+            if _parse_ts(row.get('ts', '')) < since:
+                continue
+            if row.get('event') != 'cache_wrap':
+                continue
+            sizes.append(row.get('original_bytes', 0) or 0)
+        buckets = [{'label': label.strip(), 'lo': lo, 'hi': hi if hi != float('inf') else None,
+                    'count': sum(1 for s in sizes if lo <= s < hi)}
+                   for label, lo, hi in BUCKETS]
+        trials = [{'threshold': t, 'would_cache': sum(1 for s in sizes if s > t)}
+                  for t in CANDIDATE_THRESHOLDS]
+        print(json.dumps({'since': since.isoformat(), 'days': days,
+                          'n': len(sizes), 'buckets': buckets, 'trials': trials}, indent=2))
+        return 0
+
+    if args.dist:
+        print(render_dist(since, days))
+        return 0
 
     agg = aggregate(since)
 

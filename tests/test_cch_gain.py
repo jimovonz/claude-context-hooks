@@ -144,3 +144,52 @@ def test_invalid_since_errors(tmp_path):
     rc, out, err = _run(['--since', 'not-a-date'], tmp_path)
     assert rc == 1
     assert 'invalid' in err.lower()
+
+
+def test_dist_histogram(tmp_path):
+    _seed_events(tmp_path, [
+        {'ts': _now_iso(), 'event': 'cache_wrap',
+         'cmd_head': 'a', 'original_bytes': 100, 'stub_bytes': None,
+         'cached': False, 'threshold': 8000},
+        {'ts': _now_iso(), 'event': 'cache_wrap',
+         'cmd_head': 'b', 'original_bytes': 5000, 'stub_bytes': None,
+         'cached': False, 'threshold': 8000},
+        {'ts': _now_iso(), 'event': 'cache_wrap',
+         'cmd_head': 'c', 'original_bytes': 20000, 'stub_bytes': 200,
+         'cached': True, 'threshold': 8000},
+    ])
+    rc, out, err = _run(['--dist', '--days', '1'], tmp_path)
+    assert rc == 0
+    assert 'Cache wrapper distribution' in out
+    assert 'n = 3' in out
+    assert '<-- current default' in out
+    # Threshold trial: > 4000 bytes catches 2 (the 5000 and 20000 events)
+    assert '> 4000 bytes' in out
+    # > 8000 bytes catches 1 (the 20000 event)
+    lines_with_8000 = [l for l in out.splitlines() if '> 8000' in l]
+    assert any('1' in l for l in lines_with_8000)
+
+
+def test_dist_json(tmp_path):
+    _seed_events(tmp_path, [
+        {'ts': _now_iso(), 'event': 'cache_wrap',
+         'cmd_head': 'a', 'original_bytes': 1500, 'stub_bytes': None,
+         'cached': False, 'threshold': 8000},
+        {'ts': _now_iso(), 'event': 'cache_wrap',
+         'cmd_head': 'b', 'original_bytes': 9000, 'stub_bytes': 200,
+         'cached': True, 'threshold': 8000},
+    ])
+    rc, out, err = _run(['--dist', '--json'], tmp_path)
+    assert rc == 0
+    data = json.loads(out)
+    assert data['n'] == 2
+    by_t = {t['threshold']: t['would_cache'] for t in data['trials']}
+    assert by_t[1000] == 2  # both above 1000
+    assert by_t[2000] == 1  # only 9000 above 2000
+    assert by_t[8000] == 1
+
+
+def test_dist_empty_log(tmp_path):
+    rc, out, err = _run(['--dist'], tmp_path)
+    assert rc == 0
+    assert 'No cache_wrap events' in out
