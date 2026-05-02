@@ -27,6 +27,10 @@ sys.path.insert(0, str(Path(__file__).parent))
 
 from lib.ccm_cache import init_ccm_cache, store_content, build_ccm_stub
 from lib.event_log import log_event
+try:
+    from lib.cairn_graph_footer import generate_footer
+except ImportError:
+    generate_footer = None
 
 # Threshold for caching. After RTK compression typical Bash output is
 # small; raise this if it caches too eagerly.
@@ -62,6 +66,14 @@ def main() -> int:
     stdout_bytes = proc.stdout or b''
     exit_code = proc.returncode
 
+    # Generate cairn-graph footer for code-file reads (best-effort)
+    footer_line = None
+    if exit_code == 0 and stdout_bytes and generate_footer is not None:
+        try:
+            footer_line = generate_footer(inner, os.getcwd())
+        except Exception:
+            pass
+
     if len(stdout_bytes) <= CACHE_THRESHOLD_BYTES:
         # Inline: write through unchanged.
         log_event(
@@ -73,6 +85,10 @@ def main() -> int:
             threshold=CACHE_THRESHOLD_BYTES,
         )
         sys.stdout.buffer.write(stdout_bytes)
+        if footer_line:
+            if stdout_bytes and not stdout_bytes.endswith(b'\n'):
+                sys.stdout.buffer.write(b'\n')
+            sys.stdout.buffer.write(footer_line.encode('utf-8') + b'\n')
         sys.stdout.flush()
         return exit_code
 
@@ -85,6 +101,10 @@ def main() -> int:
         sys.stdout.buffer.write(stdout_bytes)
         sys.stdout.flush()
         return exit_code
+
+    # Append footer to cached content so it appears in ccm-get retrieval
+    if footer_line:
+        content = content.rstrip('\n') + '\n' + footer_line + '\n'
 
     key = store_content(
         content,
@@ -107,7 +127,9 @@ def main() -> int:
         f'Retrieve: ccm-get.py {key} '
         '[--grep PATTERN] [--head N] [--tail N] [--lines A-B]'
     )
-    full_emit = stub + '\n' + retrieve_hint + '\n'
+    # Promote cairn-graph footer above stub so it's visible without ccm-get
+    promoted = footer_line + '\n' if footer_line else ''
+    full_emit = promoted + stub + '\n' + retrieve_hint + '\n'
     log_event(
         'cache_wrap',
         cmd_head=inner[:60],

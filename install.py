@@ -59,6 +59,7 @@ HOOK_FILES = [
     'lib/__init__.py',
     'lib/ccm_cache.py',
     'lib/event_log.py',
+    'lib/cairn_graph_footer.py',
     'cch-gain.py',
 ]
 
