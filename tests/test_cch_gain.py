@@ -193,3 +193,55 @@ def test_dist_empty_log(tmp_path):
     rc, out, err = _run(['--dist'], tmp_path)
     assert rc == 0
     assert 'No cache_wrap events' in out
+
+
+def _seed_retrievals(home: Path, rows):
+    log = home / '.claude' / 'cache' / 'ccm' / 'retrieval.log'
+    log.parent.mkdir(parents=True, exist_ok=True)
+    with open(log, 'w') as f:
+        for r in rows:
+            f.write(json.dumps(r) + '\n')
+
+
+def test_retrieval_orphan_detection(tmp_path):
+    """A cache that was never retrieved is an orphan."""
+    _seed_events(tmp_path, [
+        {'ts': _now_iso(), 'event': 'cache_wrap',
+         'cmd_head': 'find /', 'original_bytes': 50_000,
+         'stub_bytes': 200, 'cached': True, 'cache_key': 'b2s:abcd1234567890123456',
+         'threshold': 8000},
+    ])
+    # No retrievals seeded
+    rc, out, err = _run(['--retrieval', '--days', '1'], tmp_path)
+    assert rc == 0
+    assert 'n = 1 cached events, 1 orphaned' in out
+    assert '100%' in out  # orphan rate
+
+
+def test_retrieval_partial_match(tmp_path):
+    """A cache with retrievals computes the ratio correctly."""
+    full_key = 'b2s:abcd1234567890123456'
+    _seed_events(tmp_path, [
+        {'ts': _now_iso(), 'event': 'cache_wrap',
+         'cmd_head': 'big', 'original_bytes': 100_000,
+         'stub_bytes': 200, 'cached': True, 'cache_key': full_key,
+         'threshold': 8000},
+    ])
+    # retrieval.log uses key[:20] + '...'
+    truncated = full_key[:20] + '...'
+    _seed_retrievals(tmp_path, [
+        {'timestamp': _now_iso(), 'key': truncated,
+         'source_size': 100_000, 'returned_bytes': 5000,
+         'is_full_retrieval': False},
+    ])
+    rc, out, err = _run(['--retrieval', '--days', '1'], tmp_path)
+    assert rc == 0
+    # 5000/100000 = 5% -> <10% bucket
+    assert '0 orphaned' in out
+    assert '<10%' in out
+
+
+def test_retrieval_no_caches_in_window(tmp_path):
+    rc, out, err = _run(['--retrieval', '--days', '1'], tmp_path)
+    assert rc == 0
+    assert 'No cached cache_wrap events in window' in out

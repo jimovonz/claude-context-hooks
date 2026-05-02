@@ -28,8 +28,11 @@ from lib.ccm_cache import (
     list_all_keys, get_cache_stats
 )
 
-# Retrieval log for effectiveness analysis
-RETRIEVAL_LOG = Path(__file__).parent / 'retrieval.log'
+# Retrieval log for effectiveness analysis. Stable location regardless
+# of invocation path (was previously __file__.parent which split logs
+# across ~/.local/bin/ and the canonical hooks dir depending on which
+# symlink was invoked).
+RETRIEVAL_LOG = Path.home() / '.claude' / 'cache' / 'ccm' / 'retrieval.log'
 
 
 def log_retrieval(key: str, args, returned_bytes: int = None) -> None:

@@ -38,8 +38,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 
 EVENTS_LOG = Path.home() / '.claude' / 'cache' / 'ccm' / 'events.jsonl'
-# retrieval.log lives next to the canonical script, found via the symlink target.
-RETRIEVAL_LOG = Path(__file__).resolve().parent / 'retrieval.log'
+RETRIEVAL_LOG = Path.home() / '.claude' / 'cache' / 'ccm' / 'retrieval.log'
 
 CHARS_PER_TOKEN = 4
 
@@ -264,12 +263,101 @@ def render_dist(since: datetime, days: int) -> str:
     return '\n'.join(out)
 
 
+def render_retrieval(since: datetime, days: int) -> str:
+    """Per-cache retrieval-ratio analysis.
+
+    For each cache_wrap event with cached=True in the window, find all
+    matching ccm-get retrievals (joined on cache_key) and compute the
+    fraction of the original bytes that the model actually pulled back.
+
+    A cache that was never retrieved is 'orphaned' — the model emitted
+    the stub and moved on, paying ~138 tokens of round-trip overhead
+    for content it never used. Orphan rate is the headline metric for
+    threshold tuning.
+    """
+    caches = {}  # full_key -> {original, cmd_head, ts}
+    for row in _read_jsonl(EVENTS_LOG):
+        if _parse_ts(row.get('ts', '')) < since:
+            continue
+        if row.get('event') != 'cache_wrap' or not row.get('cached'):
+            continue
+        key = row.get('cache_key', '')
+        if key:
+            caches[key] = {
+                'original_bytes': row.get('original_bytes', 0) or 0,
+                'cmd_head': row.get('cmd_head', ''),
+                'ts': row.get('ts', ''),
+            }
+
+    # Index retrievals by their (truncated) key prefix
+    retrievals = {}  # key_prefix -> list of returned_bytes
+    for row in _read_jsonl(RETRIEVAL_LOG):
+        if _parse_ts(row.get('timestamp', '')) < since:
+            continue
+        # retrieval.log stores key as full_key[:20] + '...'
+        rkey = (row.get('key') or '').rstrip('.')
+        if not rkey:
+            continue
+        retrievals.setdefault(rkey, []).append({
+            'returned_bytes': row.get('returned_bytes', 0) or 0,
+            'source_size': row.get('source_size', 0) or 0,
+            'is_full': row.get('is_full_retrieval', False),
+        })
+
+    out = []
+    header = f'Cache retrieval-ratio analysis (since {since.date().isoformat()}, {days}d window)'
+    out.append(header)
+    out.append('=' * len(header))
+
+    if not caches:
+        out.append('No cached cache_wrap events in window — threshold may be set too high or workload is RTK-shrunk below it.')
+        return '\n'.join(out)
+
+    rows = []
+    orphans = 0
+    full_pulls = 0
+    for full_key, c in caches.items():
+        # Match on truncated prefix (first 20 chars)
+        prefix = full_key[:20]
+        rs = retrievals.get(prefix, [])
+        total_returned = sum(r['returned_bytes'] for r in rs)
+        ratio = total_returned / c['original_bytes'] if c['original_bytes'] else 0
+        if not rs:
+            orphans += 1
+        if any(r['is_full'] for r in rs):
+            full_pulls += 1
+        rows.append((full_key, c, len(rs), total_returned, ratio))
+
+    n = len(caches)
+    out.append(f'n = {n} cached events, {orphans} orphaned ({100*orphans/n:.0f}% never retrieved), '
+               f'{full_pulls} full-pulls ({100*full_pulls/n:.0f}%)')
+    out.append('')
+    out.append('Retrieval-ratio buckets (per-cache total_returned / original_bytes):')
+    rb = [('  0% (orphan)', lambda r: r == 0),
+          ('  <10%',         lambda r: 0 < r < 0.10),
+          ('  10-50%',       lambda r: 0.10 <= r < 0.50),
+          ('  50-90%',       lambda r: 0.50 <= r < 0.90),
+          ('  >=90%',        lambda r: r >= 0.90)]
+    for label, pred in rb:
+        c = sum(1 for _, _, _, _, ratio in rows if pred(ratio))
+        bar = '#' * c if c < 60 else '#' * 60 + f' (+{c-60})'
+        out.append(f'  {label:<14} {c:>4}  ({100*c/n:>5.1f}%)  {bar}')
+
+    out.append('')
+    out.append('Implications:')
+    out.append('  * orphan rate high -> threshold too low; caching content the model never reads')
+    out.append('  * full-pull rate high -> threshold too low OR slicing tools too coarse for workload')
+    out.append('  * 10-50% slice band -> caching is doing real work; tighten threshold to grow this band')
+    return '\n'.join(out)
+
+
 def main() -> int:
     p = argparse.ArgumentParser(prog='cch-gain', description='Token-savings report for claude-context-hooks')
     p.add_argument('--days', type=int, default=30, help='Window in days (default 30)')
     p.add_argument('--since', help='ISO date, overrides --days')
     p.add_argument('--json', action='store_true', help='Emit JSON instead of text report')
     p.add_argument('--dist', action='store_true', help='Print cache_wrap original_bytes histogram + threshold trial')
+    p.add_argument('--retrieval', action='store_true', help='Per-cache retrieval-ratio analysis (orphan rate + slice distribution)')
     args = p.parse_args()
 
     if args.since:
@@ -303,6 +391,10 @@ def main() -> int:
 
     if args.dist:
         print(render_dist(since, days))
+        return 0
+
+    if args.retrieval:
+        print(render_retrieval(since, days))
         return 0
 
     agg = aggregate(since)
