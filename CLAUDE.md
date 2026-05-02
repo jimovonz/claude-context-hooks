@@ -29,7 +29,7 @@ questions. Read it before changing direction.
 ## Where we are right now
 
 - v2.0.0 tagged at `e192fa6`, pushed to GitHub `main`.
-- All 83 tests pass.
+- All 101 tests pass.
 - Installed locally: 14 symlinks in `~/.claude/hooks/`, 3 helper
   symlinks in `~/.local/bin/` (`cch-edit.py`, `cch-write.py`,
   `ccm-get.py`), 8 PreToolUse entries in `~/.claude/settings.json`.
@@ -77,9 +77,14 @@ remove or replace it.
 
 ## Open questions
 
-- **Cache threshold.** v1 used 8KB. After RTK compression, typical Bash
-  output is small enough that 8KB may be too low — threshold may need
-  raising to avoid caching things that don't need it.
+- **Cache threshold (initial tune set to 2KB, soaking).** v1 used 8KB.
+  Empirical `cch-gain.py --dist` over an early session showed RTK
+  shrinks most output below 8KB so the wrapper barely tripped (1/92
+  events). Set `CCH_CACHE_THRESHOLD=2000` in `~/.claude/settings.json`
+  env block — should catch ~10% of commands while staying well above
+  the ~550-byte break-even floor (visible-cost only). Watch
+  `cch-gain.py --retrieval` for orphan rate over the soak week; bump
+  back up if orphans >30%.
 - **CLAUDE.md instruction snippet wording.** Iterate against real use.
   The current snippet covers helpers (`cch-edit`, `cch-write`) and the
   unconditional block on Edit/Write/NotebookEdit; correction rate from
@@ -91,7 +96,10 @@ RTK + cch on Bash; intercept-read.py allowlist — multimodal-only with
 writes via Bash helpers, no two-strike or reason-gate needed; helpers
 on PATH — installer now symlinks `cch-edit.py` / `cch-write.py` /
 `ccm-get.py` into `~/.local/bin/` collision-safely so bare
-invocation works.)
+invocation works; gain reporting — `cch-gain.py` ships with
+`--dist` for size histogram + threshold trial and `--retrieval`
+for per-cache orphan/slice analysis; threshold tuning — settings.json
+env block is the canonical override path.)
 
 ## Acceptance signal
 

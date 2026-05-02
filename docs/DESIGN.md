@@ -319,10 +319,21 @@ RTK's hook entries; only appends our own.
    if it ever breaks: replace RTK's hook with one of ours that calls
    `rtk rewrite` as a subprocess and adds cache wrapping in a single
    hook.
-2. **Cache threshold.** v1 used 8KB for Bash. After RTK compression,
-   typical Bash output is small enough that 8KB may be too low —
-   threshold may need raising to avoid caching things that don't need
-   it.
+2. **Cache threshold.** Default 8KB (`CCH_CACHE_THRESHOLD` env var).
+   v1 used 8KB. After RTK compression, typical Bash output is small
+   enough that 8KB rarely trips — early empirical `cch-gain.py --dist`
+   data showed only ~1% of commands exceeded 8KB. Lower threshold
+   (e.g. 2KB) catches more genuine wins, with the floor set by
+   round-trip overhead (~138 visible tokens per ccm-get retrieval ≈
+   ~550 bytes break-even). Override via `~/.claude/settings.json`
+   `env` block:
+   ```json
+   { "env": { "CCH_CACHE_THRESHOLD": "2000" } }
+   ```
+   Tune empirically with `cch-gain.py --dist` (size distribution +
+   threshold trial) and `cch-gain.py --retrieval` (orphan rate +
+   slice ratios). High orphan rate (caches the model never reads) is
+   the signal that the threshold has been pushed too low.
 3. **CLAUDE.md instruction wording.** Needs iteration on real usage to
    maximise compliance. The current snippet covers the maximally-clean
    shape (multimodal Read + Bash-routed everything else); the
