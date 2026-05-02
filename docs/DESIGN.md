@@ -373,6 +373,29 @@ with Bash helpers breaks that coupling.)
 | `Stop`                        | Cairn (do not touch)                                                    |
 | `PostToolUse`                 | unused (do not introduce)                                               |
 
+### Empirical workload affinity
+
+RTK and CCH compress along different axes and become complementary
+under different session shapes:
+
+- **RTK shines on command-volume sessions.** Lots of small `git` /
+  `grep` / `ls` invocations where each command has a dedicated
+  per-command shrinker (`rtk git status`, `rtk grep`, etc.). Saves
+  60-90% per command, low absolute volume per call. Wrapper rarely
+  trips because outputs are individually small after RTK.
+
+- **CCH shines on inspection-volume sessions.** Large `python3 -c`
+  data dumps, ad-hoc DB queries, log scans — outputs RTK has no
+  shrinker for. CCH wraps with a stub-and-retrieve pattern so the
+  model only pays for the slice it actually wants. Saves order-of-
+  10K-100K tokens per cached event, low call frequency.
+
+A representative early observation (2026-05-02): one session was 99%
+CCH-driven savings (~37K tokens stubbed) and 1% RTK-driven (~300
+tokens compressed) because the work was inspection-heavy. Another
+session in the same period was the opposite. The architecture's
+purpose is to capture both regimes without forcing the user to choose.
+
 ## Migration from v1
 
 The previous `claude-context-hooks` cached on every tool path. v2 keeps
