@@ -86,6 +86,7 @@ def _print_impact(file_path: Path, old_string: str, content: str) -> None:
         total_callers = 0
         total_tests = 0
         caller_files = set()
+        test_hints = set()
         for qname in touched:
             cur.execute(
                 "SELECT COUNT(*) FROM edges WHERE target_qualified = ? AND kind = 'CALLS'",
@@ -103,10 +104,17 @@ def _print_impact(file_path: Path, old_string: str, content: str) -> None:
                 caller_files.add(sq.rsplit(".", 1)[0] if "." in sq else sq)
 
             cur.execute(
-                "SELECT COUNT(*) FROM edges WHERE (source_qualified = ? OR target_qualified = ?) AND kind = 'TESTED_BY'",
-                (qname, qname),
+                "SELECT target_qualified FROM edges WHERE source_qualified = ? AND kind = 'TESTED_BY'",
+                (qname,),
             )
-            total_tests += cur.fetchone()[0]
+            for (tgt,) in cur.fetchall():
+                total_tests += 1
+                test_locs = cur.execute(
+                    "SELECT file_path, name FROM nodes WHERE qualified_name = ?",
+                    (tgt,),
+                ).fetchone()
+                if test_locs:
+                    test_hints.add((test_locs[0], test_locs[1]))
 
         conn.close()
 
@@ -114,6 +122,15 @@ def _print_impact(file_path: Path, old_string: str, content: str) -> None:
         if caller_files:
             parts.append(f"files:{len(caller_files)}")
         print(f"cch-edit: impact: {' '.join(parts)}")
+
+        if test_hints:
+            # Group by file, format as pytest command
+            by_file = {}
+            for tf, tn in test_hints:
+                by_file.setdefault(tf, []).append(tn)
+            for tf, names in list(by_file.items())[:3]:
+                selectors = " or ".join(names[:4])
+                print(f"cch-edit: run: pytest {tf} -k \"{selectors}\"")
     except Exception:
         pass  # Best-effort, never fail the edit
 
