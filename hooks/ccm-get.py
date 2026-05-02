@@ -38,6 +38,7 @@ RETRIEVAL_LOG = Path.home() / '.claude' / 'cache' / 'ccm' / 'retrieval.log'
 def log_retrieval(key: str, args, returned_bytes: int = None) -> None:
     """Log retrieval details for analysis."""
     try:
+        RETRIEVAL_LOG.parent.mkdir(parents=True, exist_ok=True)
         meta = get_metadata(key)
         source_size = meta.get('bytes_uncompressed') if meta else None
         entry = {
