@@ -11,11 +11,14 @@ Usage:
     ccm-get.py <key> --lines 100-200      # Line range (1-indexed)
     ccm-get.py <key> --grep error -C 3    # Matches with 3 lines context
     ccm-get.py <key> --grep "." --reason "editing file"  # Full content (requires reason)
+    ccm-get.py <key> --symbol my_func     # Function body via graph.db lookup
     ccm-get.py <key> --info               # Show metadata only
 """
 
 import json
+import os
 import re
+import sqlite3
 import sys
 import argparse
 from datetime import datetime
@@ -49,6 +52,7 @@ def log_retrieval(key: str, args, returned_bytes: int = None) -> None:
                 'head': args.head,
                 'tail': args.tail,
                 'lines': args.lines,
+                'symbol': args.symbol,
                 'context': args.context if args.context else None,
             },
             'reason': args.reason if args.reason else None,
@@ -65,6 +69,53 @@ def log_retrieval(key: str, args, returned_bytes: int = None) -> None:
             f.write(json.dumps(entry) + '\n')
     except Exception:
         pass  # Don't fail retrieval if logging fails
+
+
+def _resolve_symbol_lines(symbol: str):
+    """Resolve a symbol name to (line_start, line_end) via .code-review-graph/graph.db.
+
+    Walks up from cwd looking for the graph database, then queries for
+    Function/Class/Test nodes matching the symbol name.
+    Returns (line_start, line_end) tuple or None if not found.
+    """
+    # Walk up from cwd to find graph.db
+    d = Path(os.getcwd())
+    graph_db = None
+    while True:
+        candidate = d / ".code-review-graph" / "graph.db"
+        if candidate.is_file():
+            graph_db = candidate
+            break
+        parent = d.parent
+        if parent == d:
+            break
+        d = parent
+
+    if graph_db is None:
+        print("ccm-get: warning: .code-review-graph/graph.db not found", file=sys.stderr)
+        return None
+
+    try:
+        conn = sqlite3.connect(str(graph_db))
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT file_path, line_start, line_end FROM nodes "
+            "WHERE name = ? AND kind IN ('Function', 'Class', 'Test')",
+            (symbol,),
+        )
+        rows = cur.fetchall()
+        conn.close()
+    except Exception as e:
+        print(f"ccm-get: warning: graph.db query failed: {e}", file=sys.stderr)
+        return None
+
+    if not rows:
+        print(f"ccm-get: warning: symbol '{symbol}' not found in graph.db", file=sys.stderr)
+        return None
+
+    # Use first match (could be refined with file_path relevance heuristic)
+    _file_path, line_start, line_end = rows[0]
+    return (line_start, line_end)
 
 
 def main():
@@ -97,6 +148,8 @@ Full retrieval (--grep ".") requires --reason explaining why filtering isn't pos
                         help='Show last N lines')
     filter_group.add_argument('--lines', metavar='START-END',
                         help='Show line range (1-indexed, e.g., 100-200)')
+    filter_group.add_argument('--symbol', metavar='NAME',
+                        help='Extract function/class body via graph.db lookup')
     filter_group.add_argument('-C', '--context', type=int, default=0, metavar='N',
                         help='Show N lines of context around grep matches')
     filter_group.add_argument('-i', '--ignore-case', action='store_true',
@@ -212,7 +265,7 @@ Full retrieval (--grep ".") requires --reason explaining why filtering isn't pos
         return
 
     # Validate: at least one filter required
-    has_filter = any([args.grep, args.head, args.tail, args.lines])
+    has_filter = any([args.grep, args.head, args.tail, args.lines, args.symbol])
     if not has_filter:
         print("Error: At least one filter is required.", file=sys.stderr)
         print("", file=sys.stderr)
@@ -221,6 +274,7 @@ Full retrieval (--grep ".") requires --reason explaining why filtering isn't pos
         print("  --head N         First N lines", file=sys.stderr)
         print("  --tail N         Last N lines", file=sys.stderr)
         print("  --lines N-M      Line range", file=sys.stderr)
+        print("  --symbol NAME    Function/class body via graph.db", file=sys.stderr)
         print("", file=sys.stderr)
         print("For full content: --grep \".\" --reason \"why filtering isn't possible\"", file=sys.stderr)
         sys.exit(1)
@@ -251,8 +305,17 @@ Full retrieval (--grep ".") requires --reason explaining why filtering isn't pos
     original_count = len(lines)
     filtered = False
 
-    # Apply filters in order: lines range → grep → head/tail
+    # Apply filters in order: symbol → lines range → grep → head/tail
     # This allows: --grep error --head 10 = "first 10 errors"
+
+    # Symbol filter - resolve to line range via graph.db
+    if args.symbol:
+        resolved = _resolve_symbol_lines(args.symbol)
+        if resolved is None:
+            sys.exit(1)
+        sym_start, sym_end = resolved
+        lines = lines[max(0, sym_start - 1):sym_end]
+        filtered = True
 
     # Line range filter (1-indexed) - applied first to limit search scope
     if args.lines:

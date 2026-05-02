@@ -116,3 +116,117 @@ def test_preserves_executable_mode(tmp_path):
     assert rc == 0
     mode = target.stat().st_mode & 0o777
     assert mode == 0o755, f'expected 0o755, got {oct(mode)}'
+
+
+
+# --- Impact line tests ---------------------------------------------------
+
+NODES_DDL = """
+CREATE TABLE nodes (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    kind TEXT NOT NULL,
+    name TEXT NOT NULL,
+    qualified_name TEXT NOT NULL UNIQUE,
+    file_path TEXT NOT NULL,
+    line_start INTEGER,
+    line_end INTEGER,
+    language TEXT,
+    parent_name TEXT,
+    params TEXT,
+    return_type TEXT,
+    modifiers TEXT,
+    is_test INTEGER DEFAULT 0,
+    file_hash TEXT,
+    extra TEXT DEFAULT '{}',
+    updated_at REAL NOT NULL
+)
+"""
+
+EDGES_DDL = """
+CREATE TABLE edges (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    kind TEXT NOT NULL,
+    source_qualified TEXT NOT NULL,
+    target_qualified TEXT NOT NULL,
+    file_path TEXT NOT NULL,
+    line INTEGER DEFAULT 0,
+    extra TEXT DEFAULT '{}',
+    confidence REAL DEFAULT 1.0,
+    confidence_tier TEXT DEFAULT 'EXTRACTED',
+    updated_at REAL NOT NULL
+)
+"""
+
+
+import sqlite3
+
+
+def _create_impact_db(root, rel_path, nodes, edges=None):
+    """Create .code-review-graph/graph.db with nodes and edges tables.
+
+    *nodes*: list of (kind, name, qualified_name, file_path, line_start, line_end)
+    *edges*: list of (kind, source_qualified, target_qualified, file_path)
+    """
+    db_dir = root / ".code-review-graph"
+    db_dir.mkdir(parents=True, exist_ok=True)
+    db_path = db_dir / "graph.db"
+    conn = sqlite3.connect(str(db_path))
+    conn.execute(NODES_DDL)
+    conn.execute(EDGES_DDL)
+    for n in nodes:
+        kind, name, qname, fpath, ls, le = n
+        conn.execute(
+            "INSERT INTO nodes (kind, name, qualified_name, file_path, "
+            "line_start, line_end, language, updated_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, 'python', 0.0)",
+            (kind, name, qname, fpath, ls, le),
+        )
+    for e in (edges or []):
+        kind, src, tgt, fpath = e
+        conn.execute(
+            "INSERT INTO edges (kind, source_qualified, target_qualified, "
+            "file_path, updated_at) VALUES (?, ?, ?, ?, 0.0)",
+            (kind, src, tgt, fpath),
+        )
+    conn.commit()
+    conn.close()
+    return db_path
+
+
+def test_impact_line_printed(tmp_path):
+    """When graph.db exists and the edit touches a known function, the
+    impact line is printed with caller/test counts."""
+    # Create a source file inside tmp_path (repo root)
+    src = tmp_path / "mod.py"
+    src.write_text("def greet():\n    return 'hello'\n\ndef other():\n    pass\n")
+
+    # Build graph.db with one function node and one caller edge
+    _create_impact_db(
+        tmp_path,
+        "mod.py",
+        nodes=[
+            ("Function", "greet", "mod.greet", "mod.py", 1, 2),
+        ],
+        edges=[
+            ("CALLS", "app.main", "mod.greet", "app.py"),
+            ("TESTED_BY", "mod.greet", "tests.test_greet", "tests.py"),
+        ],
+    )
+
+    rc, out, err = _run(str(src), "hello", "goodbye")
+    assert rc == 0
+    assert "impact:" in out
+    assert "callers:1" in out
+    assert "tests:1" in out
+
+
+def test_impact_line_no_graph(tmp_path):
+    """Without graph.db, the edit still succeeds and no impact line appears."""
+    src = tmp_path / "mod.py"
+    src.write_text("def greet():\n    return 'hello'\n")
+
+    rc, out, err = _run(str(src), "hello", "goodbye")
+    assert rc == 0
+    assert "impact:" not in out
+    assert "replaced 1 occurrence" in out
+

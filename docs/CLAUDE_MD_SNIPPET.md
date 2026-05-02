@@ -16,6 +16,15 @@ equivalent.
 | List files                    | `fd PATTERN PATH` / `find PATH -name 'GLOB' -type f` |
 | Fetch a URL                   | `curl -sSL URL` (pipe to `rtk html` for HTML→markdown) |
 
+**Navigate code structure via Bash** (requires `crg build` once per repo):
+
+| Want                          | Use                               |
+| ----------------------------- | --------------------------------- |
+| Locate a symbol               | `cairn-graph --location SYMBOL`   |
+| Callers / callees / tests     | `cairn-graph --callers SYMBOL` / `--callees` / `--tests` |
+| Repo orientation              | `cairn-graph --summary`           |
+| Past decisions about a symbol | `cairn-graph --knowledge SYMBOL`  |
+
 **Edit / write via Bash helpers** (no read-before-edit cost — full file
 never enters context):
 
@@ -45,6 +54,7 @@ ccm-get.py <key> --head N            # first N lines
 ccm-get.py <key> --tail N            # last N lines
 ccm-get.py <key> --lines A-B         # line range
 ccm-get.py <key> --grep PATTERN -C 2 # with context
+ccm-get.py <key> --symbol NAME        # function body via graph.db
 ```
 
 Don't pull the full content unless filtering genuinely cannot serve the
