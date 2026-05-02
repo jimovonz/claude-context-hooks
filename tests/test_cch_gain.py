@@ -245,3 +245,58 @@ def test_retrieval_no_caches_in_window(tmp_path):
     rc, out, err = _run(['--retrieval', '--days', '1'], tmp_path)
     assert rc == 0
     assert 'No cached cache_wrap events in window' in out
+
+
+def test_retrieval_retry_detection(tmp_path):
+    """A similar Bash command within the retry window after a retrieval
+    is flagged as a retry — slice didn't satisfy."""
+    from datetime import timedelta
+    base = datetime.now() - timedelta(minutes=2)
+    full_key = 'b2s:abcd1234567890123456'
+    truncated = full_key[:20] + '...'
+    # Cache a find /usr command, retrieve a slice, then re-issue find /usr
+    _seed_events(tmp_path, [
+        {'ts': base.isoformat(timespec='seconds'),
+         'event': 'cache_wrap', 'cmd_head': 'find /usr -type f',
+         'original_bytes': 100_000, 'stub_bytes': 200, 'cached': True,
+         'cache_key': full_key, 'threshold': 2000},
+        {'ts': (base + timedelta(seconds=30)).isoformat(timespec='seconds'),
+         'event': 'cache_wrap', 'cmd_head': 'find /usr -type d -name lib',
+         'original_bytes': 5000, 'stub_bytes': None, 'cached': False,
+         'threshold': 2000},
+    ])
+    _seed_retrievals(tmp_path, [
+        {'timestamp': (base + timedelta(seconds=10)).isoformat(),
+         'key': truncated, 'source_size': 100_000, 'returned_bytes': 500,
+         'is_full_retrieval': False},
+    ])
+    rc, out, err = _run(['--retrieval', '--days', '1'], tmp_path)
+    assert rc == 0
+    # Both events have cmd signature ('find', '/usr') so retry flagged
+    assert "1 retries" in out
+
+
+def test_retrieval_no_retry_when_unrelated(tmp_path):
+    """Subsequent unrelated Bash command should NOT be flagged as retry."""
+    from datetime import timedelta
+    base = datetime.now() - timedelta(minutes=2)
+    full_key = 'b2s:abcd1234567890123456'
+    truncated = full_key[:20] + '...'
+    _seed_events(tmp_path, [
+        {'ts': base.isoformat(timespec='seconds'),
+         'event': 'cache_wrap', 'cmd_head': 'find /usr -type f',
+         'original_bytes': 100_000, 'stub_bytes': 200, 'cached': True,
+         'cache_key': full_key, 'threshold': 2000},
+        {'ts': (base + timedelta(seconds=30)).isoformat(timespec='seconds'),
+         'event': 'cache_wrap', 'cmd_head': 'git status',
+         'original_bytes': 200, 'stub_bytes': None, 'cached': False,
+         'threshold': 2000},
+    ])
+    _seed_retrievals(tmp_path, [
+        {'timestamp': (base + timedelta(seconds=10)).isoformat(),
+         'key': truncated, 'source_size': 100_000, 'returned_bytes': 500,
+         'is_full_retrieval': False},
+    ])
+    rc, out, err = _run(['--retrieval', '--days', '1'], tmp_path)
+    assert rc == 0
+    assert "0 retries" in out

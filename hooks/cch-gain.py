@@ -263,6 +263,18 @@ def render_dist(since: datetime, days: int) -> str:
     return '\n'.join(out)
 
 
+def _cmd_signature(cmd_head: str) -> tuple:
+    """Reduce a command to (cmd, primary_target) for retry detection.
+
+    Strips flags so 'find /usr -type f' and 'find /usr -type d' both
+    signature as ('find', '/usr'). Crude but it catches the common
+    'model didn't get what it wanted, ran the same command with a
+    different flag' pattern.
+    """
+    toks = [t for t in cmd_head.split()[:6] if not t.startswith('-')]
+    return tuple(toks[:2])
+
+
 def render_retrieval(since: datetime, days: int) -> str:
     """Per-cache retrieval-ratio analysis.
 
@@ -274,12 +286,25 @@ def render_retrieval(since: datetime, days: int) -> str:
     the stub and moved on, paying ~138 tokens of round-trip overhead
     for content it never used. Orphan rate is the headline metric for
     threshold tuning.
+
+    Also detects RETRY pattern: after a retrieval, did the model
+    immediately re-issue a similar Bash command? That signals the
+    slice didn't give what was needed and the cache failed at its job.
     """
-    caches = {}  # full_key -> {original, cmd_head, ts}
+    # Build chronologically-ordered list of ALL cache_wrap events
+    all_cw = []
     for row in _read_jsonl(EVENTS_LOG):
-        if _parse_ts(row.get('ts', '')) < since:
+        if row.get('event') != 'cache_wrap':
             continue
-        if row.get('event') != 'cache_wrap' or not row.get('cached'):
+        ts = _parse_ts(row.get('ts', ''))
+        all_cw.append((ts, row))
+    all_cw.sort(key=lambda x: x[0])
+
+    caches = {}  # full_key -> {original, cmd_head, ts}
+    for ts, row in all_cw:
+        if ts < since:
+            continue
+        if not row.get('cached'):
             continue
         key = row.get('cache_key', '')
         if key:
@@ -287,6 +312,7 @@ def render_retrieval(since: datetime, days: int) -> str:
                 'original_bytes': row.get('original_bytes', 0) or 0,
                 'cmd_head': row.get('cmd_head', ''),
                 'ts': row.get('ts', ''),
+                'ts_parsed': ts,
             }
 
     # Index retrievals by their (truncated) key prefix
@@ -313,11 +339,22 @@ def render_retrieval(since: datetime, days: int) -> str:
         out.append('No cached cache_wrap events in window — threshold may be set too high or workload is RTK-shrunk below it.')
         return '\n'.join(out)
 
+    # Build retrieval -> timestamp index for retry detection
+    retrieval_ts = {}  # key_prefix -> [(ts_parsed, ...), ...]
+    for row in _read_jsonl(RETRIEVAL_LOG):
+        ts = _parse_ts(row.get('timestamp', ''))
+        if ts < since:
+            continue
+        rkey = (row.get('key') or '').rstrip('.')
+        if rkey:
+            retrieval_ts.setdefault(rkey, []).append(ts)
+
     rows = []
     orphans = 0
     full_pulls = 0
+    retry_count = 0
+    RETRY_WINDOW_SEC = 300  # 5 minutes
     for full_key, c in caches.items():
-        # Match on truncated prefix (first 20 chars)
         prefix = full_key[:20]
         rs = retrievals.get(prefix, [])
         total_returned = sum(r['returned_bytes'] for r in rs)
@@ -326,11 +363,31 @@ def render_retrieval(since: datetime, days: int) -> str:
             orphans += 1
         if any(r['is_full'] for r in rs):
             full_pulls += 1
-        rows.append((full_key, c, len(rs), total_returned, ratio))
+
+        # Retry detection: was the next cache_wrap event after the LAST
+        # retrieval a similar command (same signature) within the window?
+        retry = False
+        ts_list = retrieval_ts.get(prefix, [])
+        if ts_list:
+            last_retrieval = max(ts_list)
+            sig = _cmd_signature(c['cmd_head'])
+            for next_ts, next_row in all_cw:
+                if next_ts <= last_retrieval:
+                    continue
+                if (next_ts - last_retrieval).total_seconds() > RETRY_WINDOW_SEC:
+                    break
+                if _cmd_signature(next_row.get('cmd_head', '')) == sig:
+                    retry = True
+                    break
+        if retry:
+            retry_count += 1
+
+        rows.append((full_key, c, len(rs), total_returned, ratio, retry))
 
     n = len(caches)
     out.append(f'n = {n} cached events, {orphans} orphaned ({100*orphans/n:.0f}% never retrieved), '
-               f'{full_pulls} full-pulls ({100*full_pulls/n:.0f}%)')
+               f'{full_pulls} full-pulls ({100*full_pulls/n:.0f}%), '
+               f'{retry_count} retries ({100*retry_count/n:.0f}% — slice didn\'t satisfy)')
     out.append('')
     out.append('Retrieval-ratio buckets (per-cache total_returned / original_bytes):')
     rb = [('  0% (orphan)', lambda r: r == 0),
@@ -339,14 +396,15 @@ def render_retrieval(since: datetime, days: int) -> str:
           ('  50-90%',       lambda r: 0.50 <= r < 0.90),
           ('  >=90%',        lambda r: r >= 0.90)]
     for label, pred in rb:
-        c = sum(1 for _, _, _, _, ratio in rows if pred(ratio))
+        c = sum(1 for _, _, _, _, ratio, _ in rows if pred(ratio))
         bar = '#' * c if c < 60 else '#' * 60 + f' (+{c-60})'
         out.append(f'  {label:<14} {c:>4}  ({100*c/n:>5.1f}%)  {bar}')
 
     out.append('')
     out.append('Implications:')
-    out.append('  * orphan rate high -> threshold too low; caching content the model never reads')
+    out.append('  * orphan rate high  -> threshold too low; caching content the model never reads')
     out.append('  * full-pull rate high -> threshold too low OR slicing tools too coarse for workload')
+    out.append('  * retry rate high   -> slice did not give what model wanted (re-issued similar bash within 5min)')
     out.append('  * 10-50% slice band -> caching is doing real work; tighten threshold to grow this band')
     return '\n'.join(out)
 
