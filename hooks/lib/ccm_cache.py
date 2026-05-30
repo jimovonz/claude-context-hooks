@@ -335,6 +335,18 @@ def retrieve_content(key: str) -> Optional[str]:
         content_bytes = decompress_content(compressed_data, compression)
         content = content_bytes.decode('utf-8')
 
+        # Integrity guard: b2s keys ARE blake2s(content), so we can recompute
+        # and detect on-disk/decompression corruption rather than handing back
+        # silently-wrong bytes. Only b2s keys are content-addressed this way.
+        if key.startswith('b2s:'):
+            recomputed = compute_content_key(content)
+            if recomputed != key:
+                import sys as _sys
+                _sys.stderr.write(
+                    f"ccm-get: WARNING integrity check failed for {key} "
+                    f"(recomputed {recomputed}) — blob may be corrupted\n"
+                )
+
         # Update access time and count
         meta = get_metadata(key)
         if meta:
@@ -455,9 +467,73 @@ def build_ccm_stub(
     stub_lines.append(f'lines: {lines}')
     if exit_code != 0:
         stub_lines.append(f'exit: {exit_code}')
+    # Self-check digit over the stub's own identifying fields. Lets a
+    # garbled-in-transit stub be detected (paste back via ccm-get --check)
+    # instead of silently extracting a wrong key and chasing a phantom.
+    stub_lines.append(f'check: {_stub_check_digit(hex_key, lines, exit_code)}')
     stub_lines.append('[/CCM_CACHED]')
 
     return '\n'.join(stub_lines)
+
+
+def _stub_check_digit(hex_key: str, lines: int, exit_code: int) -> str:
+    """Short checksum over a stub's identifying fields (key+lines+exit).
+
+    4 hex chars from blake2s. Not cryptographic — purely a transit-integrity
+    guard so a corrupted stub key is self-detecting rather than silently
+    resolving to 'not found'.
+    """
+    canonical = f"{hex_key}:{lines}:{exit_code}".encode('utf-8')
+    return hashlib.blake2s(canonical, digest_size=2).hexdigest()
+
+
+def _extract_key_token(text: str) -> Optional[str]:
+    """Pull the first b2s:/sha256: key token from arbitrary text.
+
+    The cached key lives in the 'Retrieve: ccm-get.py <key> ...' line that
+    cache-wrap emits next to the stub, not inside the stub body — so stub
+    verification must look at the whole emitted block.
+    """
+    import re
+    m = re.search(r'\b(b2s:[0-9a-f]+|sha256:[0-9a-f]+)\b', text)
+    return m.group(1) if m else None
+
+
+def verify_ccm_stub(content: str) -> Optional[bool]:
+    """Verify a cached block's check digit against its key + fields.
+
+    `content` is the full emitted block (stub + Retrieve line) as pasted
+    back. Returns True if the check digit matches, False if present but
+    wrong (garbled in transit), None if no check digit is present (legacy
+    block or not a stub) — callers treat None as 'cannot verify'.
+    """
+    if not is_ccm_stub(content):
+        return None
+    # Pull check digit directly from the stub body (parse_ccm_stub requires
+    # a 'key' field these stubs lack, so scan lines here instead).
+    check = None
+    lines_val = 0
+    exit_code = 0
+    for line in content.split('\n'):
+        s = line.strip()
+        if s.startswith('check:'):
+            check = s.partition(':')[2].strip()
+        elif s.startswith('lines:'):
+            try:
+                lines_val = int(s.partition(':')[2].strip())
+            except ValueError:
+                pass
+        elif s.startswith('exit:'):
+            try:
+                exit_code = int(s.partition(':')[2].strip())
+            except ValueError:
+                pass
+    if check is None:
+        return None
+    key = _extract_key_token(content)
+    hex_key = _key_to_hex(key) if key else ''
+    expected = _stub_check_digit(hex_key, lines_val, exit_code)
+    return check == expected
 
 
 def parse_ccm_stub(content: str) -> Optional[dict]:

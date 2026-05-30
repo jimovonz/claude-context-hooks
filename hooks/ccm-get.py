@@ -28,7 +28,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 
 from lib.ccm_cache import (
     init_ccm_cache, retrieve_content, get_metadata, get_last_key,
-    list_all_keys, get_cache_stats
+    list_all_keys, get_cache_stats, verify_ccm_stub
 )
 
 # Retrieval log for effectiveness analysis. Stable location regardless
@@ -166,12 +166,32 @@ Full retrieval (--grep ".") requires --reason explaining why filtering isn't pos
                         help='List recent cache entries')
     parser.add_argument('--stats', '-s', action='store_true',
                         help='Show cache statistics')
+    parser.add_argument('--check', action='store_true',
+                        help='Verify a pasted [CCM_CACHED] block is intact (transit-integrity check)')
     parser.add_argument('--limit', '-n', type=int, default=20,
                         help='Limit for --list (default: 20)')
 
     args = parser.parse_args()
 
     init_ccm_cache()
+
+    if args.check:
+        # Read a pasted [CCM_CACHED] block from stdin and verify its check
+        # digit. Lets a suspect (possibly garbled-in-transit) stub be tested
+        # before trusting the key it carries.
+        block = sys.stdin.read()
+        verdict = verify_ccm_stub(block)
+        if verdict is True:
+            print("OK: stub intact (check digit matches)")
+        elif verdict is False:
+            print("CORRUPT: check digit mismatch — stub was garbled in transit; "
+                  "do not trust the key, re-run the original command", file=sys.stderr)
+            sys.exit(1)
+        else:
+            print("UNVERIFIABLE: no check digit found (legacy stub or not a "
+                  "[CCM_CACHED] block)", file=sys.stderr)
+            sys.exit(1)
+        return
 
     if args.stats:
         stats = get_cache_stats()
