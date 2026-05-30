@@ -30,12 +30,30 @@ import sys
 import tempfile
 from pathlib import Path
 
+from lib.event_log import log_event
+
 WRAPPER_PATH = Path.home() / '.claude' / 'hooks' / 'cache-wrap.py'
 
 PASSTHROUGH_MARKERS = (
     'cache-wrap.py',
     'ccm-get.py',
     'cch-batch.py',
+)
+
+_CODE_EXTS = frozenset({
+    '.py', '.js', '.ts', '.tsx', '.jsx', '.rs', '.go',
+    '.java', '.rb', '.c', '.cpp', '.h', '.hpp', '.cs',
+    '.ex', '.exs',
+})
+
+_BULK_THRESHOLD = 50
+
+_BULK_WARN_THRESHOLD = 100
+
+_BULK_WARN_PREFIX = "[cch: reading {lines} lines from {path} — consider cairn-graph --location SYMBOL for targeted reads]"
+
+_BULK_READ_REDIRECT = (
+    "BLOCKED: Run cairn-graph --location SYMBOL first, then sed -n 'A,Bp' on the result."
 )
 
 
@@ -54,9 +72,9 @@ _PATTERNS = [
     (re.compile(
         r"""(?:grep|rg)\b.*(?:'|")\\?\.?(\w{2,})\((?:'|")"""
     ), "callers"),
-    # 3. Test discovery: grep 'test_foo' or grep 'def test_'
+    # 3. Test discovery: grep 'test_foo' / rg test_foo (quoted or unquoted argv)
     (re.compile(
-        r"""(?:grep|rg)\b.*(?:'|")(?:def\s+)?(test_\w+)(?:'|")"""
+        r"""(?:grep|rg)\b.*?(?:['"]|\s)(?:def\s+)?(test_\w+)(?:['"]|\s|$)"""
     ), "tests"),
     # 4. Import tracing: grep 'from foo import' or grep 'import foo'
     (re.compile(
@@ -67,32 +85,69 @@ _PATTERNS = [
 _SESSION_MARKER = Path(tempfile.gettempdir()) / f"cch-graph-redirected-{os.getppid()}"
 
 _REDIRECT_TEMPLATES = {
-    "location": (
-        "Symbol definition lookup detected. Use cairn-graph instead of grep:\\n"
-        "  cairn-graph --location {symbol}    # exact file:line\\n"
-        "  cairn-graph --callers {symbol}     # what calls it\\n"
-        "  cairn-graph --impact {symbol}      # blast radius\\n"
-        "Graph queries are faster (<15ms) and more precise than grep."
-    ),
-    "callers": (
-        "Caller search detected. Use cairn-graph instead of grep:\\n"
-        "  cairn-graph --callers {symbol}     # all call sites\\n"
-        "  cairn-graph --impact {symbol}      # blast radius\\n"
-        "Graph queries find callers precisely via AST, not string matching."
-    ),
-    "tests": (
-        "Test lookup detected. Use cairn-graph instead of grep:\\n"
-        "  cairn-graph --tests {symbol}       # TESTED_BY edges\\n"
-        "  cairn-graph --location {symbol}    # exact test location\\n"
-        "Graph queries resolve test relationships, not just name matches."
-    ),
-    "callees": (
-        "Import/dependency lookup detected. Use cairn-graph instead of grep:\\n"
-        "  cairn-graph --callees {symbol}     # what it calls/imports\\n"
-        "  cairn-graph --location {symbol}    # where it lives\\n"
-        "Graph queries trace dependencies via AST edges."
-    ),
+    "location": "BLOCKED: Use cairn-graph --location {symbol} instead of grep.",
+    "callers": "BLOCKED: Use cairn-graph --callers {symbol} instead of grep.",
+    "tests": "BLOCKED: Use cairn-graph --tests {symbol} instead of grep.",
+    "callees": "BLOCKED: Use cairn-graph --callees {symbol} instead of grep.",
 }
+
+
+def _extract_code_file(cmd_tail: str) -> str | None:
+    """Return the last non-flag token if it has a code extension."""
+    for tok in reversed(cmd_tail.split()):
+        if not tok.startswith('-'):
+            if Path(tok).suffix.lower() in _CODE_EXTS:
+                return tok
+            return None
+    return None
+
+
+def _check_bulk_read(cmd: str) -> str | None:
+    """Detect bulk reads of code files. Returns redirect message or None.
+
+    Unconditional — no session marker. cat/head/tail/sed of an entire
+    code file is never optimal; sed -n with a narrow range always works.
+    """
+    first_segment = cmd.split('|')[0] if '|' in cmd else cmd
+    effective = re.sub(r'^rtk\s+', '', first_segment.strip())
+
+    # cat <code-file> — always a full dump
+    if re.match(r'^cat\b', effective):
+        if _extract_code_file(effective[3:]):
+            return _BULK_READ_REDIRECT
+        return None
+
+    # head/tail with large -n
+    m = re.match(r'^(head|tail)\b(.*)', effective)
+    if m:
+        rest = m.group(2)
+        n_match = re.search(r'-n\s*(\d+)|-(\d+)', rest)
+        if not n_match:
+            return None  # no -n = default 10, fine
+        n = int(n_match.group(1) or n_match.group(2))
+        if n < _BULK_THRESHOLD:
+            return None
+        if _extract_code_file(rest):
+            return _BULK_READ_REDIRECT
+        return None
+
+    return None
+
+
+def _warn_bulk_sed(cmd: str) -> str | None:
+    """Return a warning prefix for large sed -n reads on code files, or None."""
+    effective = re.sub(r'^rtk\s+', '', cmd.strip())
+    m = re.match(r"""^sed\s+-n\s+['"]?(\d+),(\d+)p['"]?(.*)""", effective)
+    if not m:
+        return None
+    a, b = int(m.group(1)), int(m.group(2))
+    lines = b - a
+    if lines < _BULK_WARN_THRESHOLD:
+        return None
+    path = _extract_code_file(m.group(3))
+    if not path:
+        return None
+    return _BULK_WARN_PREFIX.format(lines=lines, path=path)
 
 
 def _check_symbol_grep(cmd: str) -> str | None:
@@ -145,12 +200,35 @@ def main() -> int:
         sys.stdout.write('{}\n')
         return 0
 
+    # Detect bulk code-file reads (unconditional — no session marker)
+    redirect = _check_bulk_read(cmd)
+    if redirect:
+        response = {
+            'hookSpecificOutput': {
+                'hookEventName': 'PreToolUse',
+                'permissionDecision': 'deny',
+                'permissionDecisionReason': redirect,
+            }
+        }
+        json.dump(response, sys.stdout)
+        sys.stdout.write('\n')
+        return 0
+
+    # Soft-warn on large sed -n reads (non-blocking — prepends warning to output)
+    warn_msg = _warn_bulk_sed(cmd)
+    if warn_msg:
+        log_event('warn_bulk_sed', cmd_head=cmd[:120])
+        cmd = f'echo "{warn_msg}"; {cmd}'
+
     # Detect symbol-lookup-via-grep and redirect to cairn-graph (once per session)
     redirect = _check_symbol_grep(cmd)
     if redirect:
         response = {
-            'permissionDecision': 'deny',
-            'reason': redirect,
+            'hookSpecificOutput': {
+                'hookEventName': 'PreToolUse',
+                'permissionDecision': 'deny',
+                'permissionDecisionReason': redirect,
+            }
         }
         json.dump(response, sys.stdout)
         sys.stdout.write('\n')
