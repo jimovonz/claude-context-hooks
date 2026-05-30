@@ -21,18 +21,8 @@ sys.path.insert(0, str(Path(__file__).parent))
 from lib.event_log import log_event
 
 REASON = (
-    "Built-in Edit denied — routes through Bash via cch-edit to avoid\n"
-    "the read-before-edit guard pulling the full file into context\n"
-    "(which would undo the cache wrapper for the file being edited).\n"
-    "\n"
-    "For {path}:\n"
-    "  cch-edit.py {path} 'old_string' 'new_string'\n"
-    "  cch-edit.py {path} 'old' 'new' --all                  # replace all\n"
-    "  cch-edit.py {path} --old-file F1 --new-file F2        # multi-line\n"
-    "\n"
-    "cch-edit replicates the built-in's safety contract: literal-string\n"
-    "match (no regex), errors on missing or non-unique old_string,\n"
-    "atomic write, prints unified diff on success."
+    "BLOCKED: Use cch-edit.py {path} 'old' 'new' instead.\n"
+    "Multi-line: cch-edit.py {path} --old-file F1 --new-file F2"
 )
 
 

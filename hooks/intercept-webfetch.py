@@ -14,13 +14,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 from lib.event_log import log_event
 
 REASON = (
-    "Use Bash with curl instead so output is RTK-compressed and cached. "
-    "Equivalent invocations:\n"
-    "  curl -sSL URL                       # follow redirects, silent\n"
-    "  curl -sSL URL | rtk html            # strip to readable text\n"
-    "  curl -sSLI URL                      # headers only\n"
-    "  curl -sSL -o file URL               # save to disk\n"
-    "Pipe through rtk for HTML→markdown when fetching pages."
+    "BLOCKED: Use curl -sSL URL (pipe to rtk html for pages)."
 )
 
 

@@ -24,19 +24,8 @@ sys.path.insert(0, str(Path(__file__).parent))
 from lib.event_log import log_event
 
 REASON = (
-    "Built-in NotebookEdit denied — notebooks are large (embedded output\n"
-    "cells) and the read-before-edit guard would pull the full .ipynb\n"
-    "into context, the worst case for the cache bypass.\n"
-    "\n"
-    "For {path}, edit via Bash:\n"
-    "  cch-edit.py {path} 'old_source_substring' 'new_source_substring'\n"
-    "    (notebooks are JSON; literal match works if old_source is unique)\n"
-    "\n"
-    "  jq '.cells[N].source = [\"new line\\n\"]' {path} > {path}.new && mv {path}.new {path}\n"
-    "    (cell-level edits via jq)\n"
-    "\n"
-    "  python3 -c 'import nbformat; nb = nbformat.read(\"{path}\", 4); ...; nbformat.write(nb, \"{path}\")'\n"
-    "    (structured editing via nbformat)"
+    "BLOCKED: Use cch-edit.py {path} 'old_source' 'new_source' (JSON literal match).\n"
+    "Cell-level: jq '.cells[N].source = [...]' {path} > tmp && mv tmp {path}"
 )
 
 

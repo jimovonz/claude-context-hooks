@@ -31,20 +31,8 @@ MULTIMODAL_EXTS = {
 }
 
 REASON_TEMPLATE = (
-    "Read of {path} denied — routes through Bash so output is\n"
-    "RTK-compressed and large residuals cached for slice retrieval.\n"
-    "\n"
-    "Inspect with:\n"
-    "  cat {path}\n"
-    "  head -n 100 {path}\n"
-    "  sed -n '1,200p' {path}\n"
-    "  rg -n PATTERN {path}\n"
-    "\n"
-    "Edit with cch-edit (no read-before-edit cost):\n"
-    "  cch-edit.py {path} 'old_string' 'new_string'\n"
-    "\n"
-    "Built-in Read is allowed only for multimodal files\n"
-    "(.png/.jpg/.jpeg/.gif/.webp/.bmp/.pdf/.ipynb/.svg)."
+    "BLOCKED: Use cairn-graph --location SYMBOL first, then sed -n 'A,Bp' {path}.\n"
+    "Edit: cch-edit.py {path} 'old' 'new'"
 )
 
 

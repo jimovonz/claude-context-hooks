@@ -14,13 +14,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 from lib.event_log import log_event
 
 REASON = (
-    "Use Bash with fd (or find) instead so output is RTK-compressed and cached. "
-    "Equivalent invocations:\n"
-    "  fd PATTERN PATH                     # name match (regex by default)\n"
-    "  fd -e py PATTERN                    # extension filter\n"
-    "  fd -t f PATTERN                     # files only\n"
-    "  find PATH -name 'GLOB' -type f      # if fd is unavailable\n"
-    "Pipe to head/wc when only counts/first-N are needed."
+    "BLOCKED: Use fd PATTERN PATH (or find PATH -name 'GLOB' -type f)."
 )
 
 

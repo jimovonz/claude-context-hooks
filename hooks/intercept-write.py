@@ -19,21 +19,8 @@ sys.path.insert(0, str(Path(__file__).parent))
 from lib.event_log import log_event
 
 REASON = (
-    "Built-in Write denied — routes through Bash via cch-write to avoid\n"
-    "the read-before-edit guard pulling the existing file into context.\n"
-    "\n"
-    "For {path}:\n"
-    "  echo 'content' | cch-write.py {path}\n"
-    "  cat source.txt | cch-write.py {path}\n"
-    "  cch-write.py {path} < /tmp/source\n"
-    "\n"
-    "  cch-write.py {path} << 'EOF'\n"
-    "  multi-line content with $vars and `backticks` not expanded\n"
-    "  EOF\n"
-    "\n"
-    "cch-write reads content from stdin (no shell-escaping required),\n"
-    "writes atomically (temp + rename), and creates parent directories\n"
-    "on demand."
+    "BLOCKED: Use cch-write.py {path} << 'EOF' ... EOF instead.\n"
+    "Reads stdin, atomic write, creates parent dirs."
 )
 
 
