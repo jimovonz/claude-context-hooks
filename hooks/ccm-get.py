@@ -305,6 +305,37 @@ Full retrieval (--grep ".") requires --reason explaining why filtering isn't pos
     original_count = len(lines)
     filtered = False
 
+    # Warn when --lines/--head/--tail covers ~all content with no narrowing.
+    # Same anti-pattern as --grep "." but via line-based bypasses — defeats
+    # the stub mechanism and pulls full content back into context.
+    if original_count and not args.grep and not args.symbol:
+        coverage = None
+        if args.head:
+            coverage = min(args.head, original_count)
+        elif args.tail:
+            coverage = min(args.tail, original_count)
+        elif args.lines:
+            try:
+                if '-' in args.lines:
+                    _s, _e = args.lines.split('-', 1)
+                    _s = int(_s) if _s else 1
+                    _e = int(_e) if _e else original_count
+                else:
+                    _s = _e = int(args.lines)
+                coverage = max(0, min(_e, original_count) - max(0, _s - 1))
+            except ValueError:
+                coverage = None
+        if coverage is not None and coverage / original_count >= 0.9:
+            pct = int(100 * coverage / original_count)
+            est_tokens = original_count * 8
+            print(
+                f"[ccm-get: wasteful retrieval — {coverage}/{original_count} lines "
+                f"({pct}%) pulls full content into context (~{est_tokens} tokens), "
+                f"defeating the cache stub. Narrow with --grep PATTERN, "
+                f"--symbol NAME, or a smaller --lines A-B.]",
+                file=sys.stderr,
+            )
+
     # Apply filters in order: symbol → lines range → grep → head/tail
     # This allows: --grep error --head 10 = "first 10 errors"
 
@@ -387,4 +418,11 @@ Full retrieval (--grep ".") requires --reason explaining why filtering isn't pos
 
 
 if __name__ == '__main__':
-    main()
+    # CCH helper: refusals/errors print to stderr but must NOT exit non-zero.
+    # A non-zero exit inside a parallel Bash batch makes the harness cancel
+    # every sibling tool call (cascade). Real crashes (uncaught exceptions)
+    # still surface naturally; argparse/sys.exit refusals are downgraded to 0.
+    try:
+        main()
+    except SystemExit:
+        pass
