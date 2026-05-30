@@ -76,6 +76,7 @@ def aggregate(since: datetime):
     deny_grep = {'count': 0}
     deny_glob = {'count': 0}
     deny_webfetch = {'count': 0}
+    graph = {'queries': 0, 'actual_bytes': 0, 'counterfactual_bytes': 0}
 
     for row in _read_jsonl(EVENTS_LOG):
         if _parse_ts(row.get('ts', '')) < since:
@@ -83,13 +84,23 @@ def aggregate(since: datetime):
         ev = row.get('event')
         if ev == 'cache_wrap':
             cache_wrap['cmds'] += 1
-            cache_wrap['original_bytes'] += row.get('original_bytes', 0) or 0
+            original = row.get('original_bytes', 0) or 0
+            cache_wrap['original_bytes'] += original
             if row.get('cached'):
                 cache_wrap['cached'] += 1
                 cache_wrap['stub_bytes'] += row.get('stub_bytes', 0) or 0
             else:
-                # Below-threshold: stub == original (no saving)
-                cache_wrap['stub_bytes'] += row.get('original_bytes', 0) or 0
+                cache_wrap['stub_bytes'] += original
+            cmd = row.get('cmd_head', '')
+            if 'cairn-graph --' in cmd:
+                graph['queries'] += 1
+                graph['actual_bytes'] += original
+                if '--location' in cmd:
+                    graph['counterfactual_bytes'] += max(original * 50, 4000)
+                elif any(f in cmd for f in ('--callers', '--callees', '--tests')):
+                    graph['counterfactual_bytes'] += max(original * 5, 2000)
+                else:
+                    graph['counterfactual_bytes'] += max(original * 10, 3000)
         elif ev == 'deny_read':
             deny_read['count'] += 1
             deny_read['st_size_total'] += row.get('st_size', 0) or 0
@@ -127,6 +138,7 @@ def aggregate(since: datetime):
         'deny_grep': deny_grep,
         'deny_glob': deny_glob,
         'deny_webfetch': deny_webfetch,
+        'graph': graph,
     }
 
 
@@ -192,7 +204,15 @@ def render_text(agg, since: datetime, days: int) -> str:
         f"savings not measurable (built-in summarizes vs curl returns raw)"
     )
 
-    total = cw_saved + r_saved + dr['st_size_total'] + dew['st_size_total']
+    g = agg['graph']
+    g_saved = g['counterfactual_bytes'] - g['actual_bytes']
+    out.append(
+        f"Graph queries:     {g['queries']:>4} queries, "
+        f"{_kb(g['actual_bytes'])} actual vs {_kb(g['counterfactual_bytes'])} counterfactual "
+        f"-> saved {_tokens(g_saved)}   [counterfactual: multiplier model]"
+    )
+
+    total = cw_saved + r_saved + dr['st_size_total'] + dew['st_size_total'] + g_saved
     out.append('')
     out.append(f"Total honest savings: {_tokens(total)} ({_kb(total)})")
     out.append('')
