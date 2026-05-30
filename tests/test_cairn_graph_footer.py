@@ -10,8 +10,9 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).parent.parent / 'hooks'))
 from lib.cairn_graph_footer import (
-    _extract_source_file, _find_graph_db, _query_graph,
-    _query_cairn, _format_footer, generate_footer,
+    _extract_source_file, _extract_line_range, _find_graph_db,
+    _resolve_functions, _query_cairn, _format_footer,
+    _format_memory, generate_footer, _load_seen, _SESSION_SEEN_FILE,
 )
 
 GRAPH_SCHEMA = """
@@ -217,46 +218,60 @@ class TestFindGraphDb:
         assert _find_graph_db(str(tmp_path)) is None
 
 
-class TestQueryGraph:
-    def test_counts(self, graph_repo):
+class TestResolveFunctions:
+    def test_all_functions(self, graph_repo):
         db = _find_graph_db(str(graph_repo))
         fp = str(graph_repo / "src" / "main.py")
-        callers, tests = _query_graph(db, fp)
-        assert callers == 2
-        assert tests == 1
+        fns = _resolve_functions(db, fp, None, None)
+        assert len(fns) == 1
+        assert fns[0]['name'] == 'foo'
+        assert fns[0]['callers'] == 2
+        assert fns[0]['tests'] == 1
+
+    def test_line_range_match(self, graph_repo):
+        db = _find_graph_db(str(graph_repo))
+        fp = str(graph_repo / "src" / "main.py")
+        fns = _resolve_functions(db, fp, 5, 15)
+        assert len(fns) == 1
+        assert fns[0]['name'] == 'foo'
+
+    def test_line_range_miss(self, graph_repo):
+        db = _find_graph_db(str(graph_repo))
+        fp = str(graph_repo / "src" / "main.py")
+        fns = _resolve_functions(db, fp, 100, 200)
+        assert len(fns) == 0
 
     def test_no_nodes(self, graph_repo):
         db = _find_graph_db(str(graph_repo))
-        callers, tests = _query_graph(db, "/nonexistent/file.py")
-        assert callers == 0
-        assert tests == 0
+        fns = _resolve_functions(db, "/nonexistent/file.py", None, None)
+        assert len(fns) == 0
 
 
 # --- Cairn DB ---
 
 class TestQueryCairn:
     def test_correction_returned(self, cairn_db, tmp_path):
-        results = _query_cairn(cairn_db, f"{tmp_path}/src/main.py")
+        results = _query_cairn(cairn_db, f"{tmp_path}/src/main.py", [])
         types = [r['type'] for r in results]
         assert 'correction' in types
 
     def test_low_confidence_excluded(self, cairn_db, tmp_path):
-        results = _query_cairn(cairn_db, f"{tmp_path}/src/main.py")
+        results = _query_cairn(cairn_db, f"{tmp_path}/src/main.py", [])
         for r in results:
             assert 'Maybe wrong' not in r['content']
 
     def test_deleted_excluded(self, cairn_db, tmp_path):
-        results = _query_cairn(cairn_db, f"{tmp_path}/src/main.py")
+        results = _query_cairn(cairn_db, f"{tmp_path}/src/main.py", [])
         for r in results:
             assert 'Old fix' not in r['content']
 
     def test_wrong_type_excluded(self, cairn_db, tmp_path):
-        results = _query_cairn(cairn_db, f"{tmp_path}/src/main.py")
+        results = _query_cairn(cairn_db, f"{tmp_path}/src/main.py", [])
         types = [r['type'] for r in results]
         assert 'fact' not in types
 
     def test_max_two(self, cairn_db, tmp_path):
-        results = _query_cairn(cairn_db, f"{tmp_path}/src/main.py")
+        results = _query_cairn(cairn_db, f"{tmp_path}/src/main.py", [])
         assert len(results) <= 2
 
 
@@ -264,39 +279,85 @@ class TestQueryCairn:
 
 class TestFormatFooter:
     def test_basic(self):
-        result = _format_footer(5, 2, [])
-        assert result == "[cairn-graph: 5 callers · 2 tests]"
+        fns = [{'name': 'foo', 'callers': 5, 'tests': 2, 'qualified_name': 'x::foo'}]
+        result = _format_footer(fns, [])
+        assert 'foo: 5 callers' in result
+        assert '2 tests' in result
 
     def test_with_memory(self):
+        fns = [{'name': 'bar', 'callers': 3, 'tests': 1, 'qualified_name': 'x::bar'}]
         mem = [{'type': 'correction', 'content': 'Fixed bug', 'updated_at': '2026-05-02 10:00:00'}]
-        result = _format_footer(3, 1, mem)
+        result = _format_footer(fns, mem)
         assert 'correction' in result
         assert 'Fixed bug' in result
 
     def test_truncation(self):
+        fns = [{'name': 'baz', 'callers': 5, 'tests': 2, 'qualified_name': 'x::baz'}]
         mem = [{'type': 'correction', 'content': 'A' * 200, 'updated_at': '2026-05-02 10:00:00'}]
-        result = _format_footer(5, 2, mem)
+        result = _format_footer(fns, mem)
         assert len(result) <= 200
 
     def test_no_data_returns_none(self):
-        assert _format_footer(0, 0, []) is None
+        assert _format_footer([], []) is None
 
-    def test_zero_callers_with_memory(self):
+    def test_memories_only(self):
         mem = [{'type': 'decision', 'content': 'Use X', 'updated_at': '2026-05-02 10:00:00'}]
-        result = _format_footer(0, 0, mem)
+        result = _format_footer([], mem)
         assert result is not None
         assert 'decision' in result
+
+    def test_multiple_functions(self):
+        fns = [
+            {'name': 'foo', 'callers': 2, 'tests': 1, 'qualified_name': 'x::foo'},
+            {'name': 'bar', 'callers': 0, 'tests': 0, 'qualified_name': 'x::bar'},
+        ]
+        result = _format_footer(fns, [])
+        assert 'foo:' in result
+        assert 'bar:' in result
 
 
 # --- Integration ---
 
 class TestGenerateFooter:
     def test_full_pipeline(self, graph_repo):
+        if _SESSION_SEEN_FILE.exists():
+            _SESSION_SEEN_FILE.unlink()
         fp = str(graph_repo / "src" / "main.py")
         result = generate_footer(f"cat {fp}", str(graph_repo))
         assert result is not None
+        assert "foo:" in result
         assert "2 callers" in result
         assert "1 tests" in result
+
+    def test_dedup(self, graph_repo):
+        """Second call for same file returns None (dedup)."""
+        if _SESSION_SEEN_FILE.exists():
+            _SESSION_SEEN_FILE.unlink()
+        fp = str(graph_repo / "src" / "main.py")
+        result1 = generate_footer(f"cat {fp}", str(graph_repo))
+        assert result1 is not None
+        result2 = generate_footer(f"cat {fp}", str(graph_repo))
+        assert result2 is None
+        _SESSION_SEEN_FILE.unlink(missing_ok=True)
+
+    def test_sed_line_range(self, graph_repo):
+        """sed -n with range overlapping foo (lines 1-20) shows foo."""
+        if _SESSION_SEEN_FILE.exists():
+            _SESSION_SEEN_FILE.unlink()
+        fp = str(graph_repo / "src" / "main.py")
+        result = generate_footer(f"sed -n '5,10p' {fp}", str(graph_repo))
+        assert result is not None
+        assert "foo:" in result
+        _SESSION_SEEN_FILE.unlink(missing_ok=True)
+
+    def test_sed_line_range_miss(self, graph_repo):
+        """sed -n with range outside any function returns None."""
+        if _SESSION_SEEN_FILE.exists():
+            _SESSION_SEEN_FILE.unlink()
+        fp = str(graph_repo / "src" / "main.py")
+        result = generate_footer(f"sed -n '100,200p' {fp}", str(graph_repo))
+        assert result is None
+        _SESSION_SEEN_FILE.unlink(missing_ok=True)
 
     def test_no_graph_returns_none(self, tmp_path):
         (tmp_path / "foo.py").touch()
@@ -313,3 +374,40 @@ class TestGenerateFooter:
         (tmp_path / "foo.py").touch()
         result = generate_footer("cat foo.py", str(tmp_path))
         assert result is None
+
+
+class TestExtractLineRange:
+    def test_sed_basic(self):
+        assert _extract_line_range("sed -n '10,25p' foo.py") == (10, 25)
+
+    def test_sed_double_quotes(self):
+        assert _extract_line_range('sed -n "10,25p" foo.py') == (10, 25)
+
+    def test_sed_rtk_prefix(self):
+        assert _extract_line_range("rtk sed -n '100,150p' bar.py") == (100, 150)
+
+    def test_head_n(self):
+        assert _extract_line_range("head -n 20 foo.py") == (1, 20)
+
+    def test_head_dash_n(self):
+        assert _extract_line_range("head -n20 foo.py") == (1, 20)
+
+    def test_head_shortform(self):
+        assert _extract_line_range("head -20 foo.py") == (1, 20)
+
+    def test_cat_no_range(self):
+        assert _extract_line_range("cat foo.py") == (None, None)
+
+    def test_non_read(self):
+        assert _extract_line_range("git log") == (None, None)
+
+
+class TestSessionDedup:
+    def test_load_save(self):
+        if _SESSION_SEEN_FILE.exists():
+            _SESSION_SEEN_FILE.unlink()
+        from lib.cairn_graph_footer import _save_seen, _load_seen
+        assert _load_seen() == set()
+        _save_seen({'a::foo', 'b::bar'})
+        assert _load_seen() == {'a::foo', 'b::bar'}
+        _SESSION_SEEN_FILE.unlink(missing_ok=True)
