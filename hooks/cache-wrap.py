@@ -36,6 +36,31 @@ except ImportError:
 # small; raise this if it caches too eagerly.
 CACHE_THRESHOLD_BYTES = int(os.environ.get('CCH_CACHE_THRESHOLD', '8000'))
 
+# Fail-soft channel split. An inner command's exit code serves two readers:
+# the harness control-flow (which cancels sibling tool calls in a parallel
+# batch when any one "errors") and the human/model (who needs to know if the
+# work succeeded). The harness welds the cascade decision to that one integer,
+# so a benign non-zero exit (grep no-match, ls missing, diff differs, pkill
+# self-match → 144) cancels every unrelated sibling call in the same turn.
+#
+# We split the channel: report 0 to the harness so siblings never get
+# cancelled, and carry the REAL exit code in-band where the model can see it
+# ([exit N] marker on the inline path; the stub's `exit:` field on the cached
+# path). Shell-internal semantics (&&, ||, set -e) already resolved INSIDE the
+# `bash -c` subprocess before we report, so neutralizing the OUTER code changes
+# only the harness's cascade decision — nothing else.
+#
+# Set CCH_PROPAGATE_EXIT=1 to restore raw propagation (for automation that
+# genuinely depends on cache-wrap's process exit code). Wrapper-usage errors
+# (bad argv, bash-not-found) always propagate regardless — those are "you
+# invoked the tool wrong", not inner-command results.
+PROPAGATE_EXIT = os.environ.get('CCH_PROPAGATE_EXIT') == '1'
+
+
+def _reported_code(inner_exit: int) -> int:
+    """Exit code cache-wrap reports to the harness for an inner-command run."""
+    return inner_exit if PROPAGATE_EXIT else 0
+
 
 def main() -> int:
     # Argv: cache-wrap.py -- <inner command...>
@@ -90,8 +115,15 @@ def main() -> int:
             if stdout_bytes and not stdout_bytes.endswith(b'\n'):
                 sys.stdout.buffer.write(b'\n')
             sys.stdout.buffer.write(footer_line.encode('utf-8') + b'\n')
+        # In-band exit marker so a non-zero result stays legible even though
+        # we report 0 to the harness (fail-soft channel split). Skipped when
+        # propagating raw, since the process exit code already carries it.
+        if exit_code != 0 and not PROPAGATE_EXIT:
+            if stdout_bytes and not stdout_bytes.endswith(b'\n'):
+                sys.stdout.buffer.write(b'\n')
+            sys.stdout.buffer.write(f'[exit {exit_code}]\n'.encode('utf-8'))
         sys.stdout.flush()
-        return exit_code
+        return _reported_code(exit_code)
 
     # Above threshold: cache and emit stub.
     try:
@@ -101,7 +133,12 @@ def main() -> int:
         # in a text-oriented cache would corrupt it.
         sys.stdout.buffer.write(stdout_bytes)
         sys.stdout.flush()
-        return exit_code
+        # Can't append a text marker to binary stdout without corrupting it,
+        # so surface the real exit code on stderr instead (still fail-soft:
+        # we report 0 to the harness via _reported_code).
+        if exit_code != 0 and not PROPAGATE_EXIT:
+            sys.stderr.write(f'[exit {exit_code}]\n')
+        return _reported_code(exit_code)
 
     # Append footer to cached content so it appears in ccm-get retrieval
     if footer_line:
@@ -143,7 +180,9 @@ def main() -> int:
     )
     sys.stdout.write(full_emit)
     sys.stdout.flush()
-    return exit_code
+    # Cached path: the stub's `exit:` field already carries the real code
+    # in-band, so just neutralize the reported code (fail-soft channel split).
+    return _reported_code(exit_code)
 
 
 if __name__ == '__main__':

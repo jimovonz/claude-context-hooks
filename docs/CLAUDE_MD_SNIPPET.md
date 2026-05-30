@@ -57,5 +57,53 @@ ccm-get.py <key> --grep PATTERN -C 2 # with context
 ccm-get.py <key> --symbol NAME        # function body via graph.db
 ```
 
-Don't pull the full content unless filtering genuinely cannot serve the
-need (`--grep "." --reason "<20+ chars why>"`).
+Don't pull the full content. The cache wrapper warns when `--lines`,
+`--head`, or `--tail` would return ≥90% of the stub — same anti-pattern
+as `--grep "."`. If filtering genuinely cannot serve the need, use
+`--grep "." --reason "<20+ chars why>"`.
+
+**Parallel Bash calls are safe — batch freely.** The cache wrapper is
+fail-soft: a Bash command's non-zero exit is reported to the harness as
+success, so one call's benign failure (e.g. `grep` no-match → exit 1)
+never cancels its sibling calls in the same turn. The real exit code is
+preserved in-band: an `[exit N]` line on small output, or the stub's
+`exit:` field on cached output. So judge failure from `[exit N]` /
+`exit:` (and the command's own output) — not the absence of a tool
+error. Set `CCH_PROPAGATE_EXIT=1` to restore raw exit-code propagation if
+you need it. Wrapper-usage errors (bad argv) still propagate loudly.
+
+**`pkill -f` / `pgrep -f` self-match.** `-f` matches the whole command
+line, including the wrapper chain that contains your own pattern, so
+`pkill -f forscan_elm.py` kills its own shell (exit 144). Use a PID file
+(`echo $! > x.pid; kill "$(cat x.pid)"`) or exclude yourself
+(`pgrep -f foo | grep -v $$`).
+
+**Worked example — tracing a code path across multiple files:**
+
+Don't open the entry file and read top-to-bottom. Use the graph to jump
+straight to the symbols you need.
+
+```bash
+# 1. Orient
+cairn-graph --summary                     # repo shape, top symbols
+
+# 2. Locate the entry symbol
+cairn-graph --location handle_request     # → src/server.py:142-198
+
+# 3. Read just that function (NOT the whole file)
+sed -n '142,198p' src/server.py
+
+# 4. Follow what it calls
+cairn-graph --callees handle_request      # → validate, dispatch, render
+cairn-graph --location dispatch           # → src/router.py:55-104
+sed -n '55,104p' src/router.py
+
+# 5. Verify a constant before reasoning about it
+rg -n 'TIMEOUT_MS' src/router.py
+```
+
+Anti-pattern: `cat src/server.py` then `cat src/router.py`. The
+`_check_bulk_read` block fires on `cat` of code files; even `sed -n`
+of a 200-line range when you only need 50 lines around a function
+wastes context. Use `--location SYMBOL` first, then narrow `sed -n
+A,Bp` to the function range.
