@@ -52,7 +52,9 @@ HOOK_FILES = [
     'intercept-edit.py',
     'intercept-write.py',
     'intercept-notebookedit.py',
+    'intercept-agent.py',
     'cache-wrap.py',
+    'cch-batch.py',
     'cch-edit.py',
     'cch-write.py',
     'ccm-get.py',
@@ -69,6 +71,7 @@ HOOK_FILES = [
 # HOOKS_DST. We never overwrite an existing entry that points elsewhere
 # (could be the user's own script with a colliding name).
 BIN_FILES = [
+    'cch-batch.py',
     'cch-edit.py',
     'cch-write.py',
     'ccm-get.py',
@@ -86,6 +89,7 @@ HOOK_REGISTRATIONS = [
     ('PreToolUse', 'Edit',     '~/.claude/hooks/intercept-edit.py'),
     ('PreToolUse', 'Write',    '~/.claude/hooks/intercept-write.py'),
     ('PreToolUse', 'NotebookEdit', '~/.claude/hooks/intercept-notebookedit.py'),
+    ('PreToolUse', 'Agent',        '~/.claude/hooks/intercept-agent.py'),
 ]
 
 

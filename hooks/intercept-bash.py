@@ -35,6 +35,7 @@ WRAPPER_PATH = Path.home() / '.claude' / 'hooks' / 'cache-wrap.py'
 PASSTHROUGH_MARKERS = (
     'cache-wrap.py',
     'ccm-get.py',
+    'cch-batch.py',
 )
 
 
