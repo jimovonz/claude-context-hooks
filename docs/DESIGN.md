@@ -75,9 +75,31 @@ to a content-addressable cache and emit a stub on stdout. The bash tool's
 model retrieves selectively via `ccm-get.py` filters (`--grep`, `--head`,
 `--tail`, `--lines`).
 
+The wrapper is **fail-soft**: it reports exit 0 to the harness for every
+inner-command run, carrying the real exit code in-band instead (an
+`[exit N]` line on inline output, the stub's `exit:` field on cached
+output). This exists because the Claude Code harness cancels every other
+tool call in a parallel batch when any one reports a non-zero exit — and
+inspection commands return non-zero as a matter of course (`grep`
+no-match, `ls` of a missing path, `diff` finding differences). Splitting
+the exit-code channel — success to the harness, real code in-band — means
+benign failures never cancel sibling calls, so parallel Bash batches are
+safe. Shell-internal semantics (`&&`, `set -e`) already resolved inside
+the inner `bash -c` before the wrapper reports, so only the harness's
+cascade decision changes. `CCH_PROPAGATE_EXIT=1` restores raw
+propagation; wrapper-usage errors (bad argv) always propagate. Cached
+content also carries a check digit so a garbled-in-transit stub is
+detectable (`ccm-get.py --check`), and retrieval recomputes the BLAKE2s
+key to catch on-disk corruption.
+
 **Layer 3 — Memory.** Cairn surfaces past corrections at session start
 via its own UserPromptSubmit retrieval. Passive cross-session
 reinforcement, untouched by this project.
+
+(The diagram shows the seven blocked data tools. A separate
+`PreToolUse:Agent` hook redirects Explore sub-agents whose prompt is a
+code-structure query to `cairn-graph` rather than spawning an agent with
+un-routed tool access; all other agents pass through.)
 
 ## Mechanisms
 
@@ -216,6 +238,7 @@ preferred bash commands and Bash-routed write helpers.
 | `intercept-edit.py`           | block   | none — always redirect to `cch-edit` via Bash  |
 | `intercept-write.py`          | block   | none — always redirect to `cch-write` via Bash |
 | `intercept-notebookedit.py`   | block   | none — always redirect to `cch-edit` / `jq` / `nbformat` via Bash |
+| `intercept-agent.py`          | pass    | redirect Explore agents whose prompt is a code-structure query to `cairn-graph`; all other agents pass |
 
 Each hook is small (~30–50 lines), reads tool input from stdin, decides
 allow/deny, emits valid `hookSpecificOutput`. Deny responses include a
@@ -226,7 +249,10 @@ allow/deny, emits valid `hookSpecificOutput`. Deny responses include a
 Wraps the RTK-rewritten command. Captures output, measures size, writes
 to cache and emits stub if above threshold; otherwise emits output
 unchanged. Surfaced through Bash's natural `tool_result` channel — no
-deny-channel abuse.
+deny-channel abuse. Fail-soft: reports exit 0 to the harness and carries
+the real exit code in-band (`[exit N]` / stub `exit:`) so a benign
+non-zero exit never cancels sibling tool calls in a parallel batch (see
+Layer 2). `CCH_PROPAGATE_EXIT=1` restores raw propagation.
 
 Layering: our PreToolUse:Bash hook is registered **after** RTK's in
 `~/.claude/settings.json`. RTK's hook fires first and produces an
@@ -269,10 +295,22 @@ multi-line content with $vars and `backticks` not expanded
 EOF
 ```
 
+### `cch-batch.py`
+
+Runs many independent commands concurrently in a single tool call.
+Commands are read from stdin (one per line; blanks and `#`-comments
+skipped), run in parallel through `cache-wrap.py`, and emitted as one
+delimited block per command in input order. Because it is a single tool
+call there are no sibling calls for the harness to cancel — cascade-immune
+by construction — and it gives real wall-clock parallelism for deliberate
+fan-out. `--jobs N` caps concurrency (default 8); `--no-cache-wrap` runs
+each command via plain `bash -c`.
+
 ### `lib/ccm_cache.py`
 
-Content-addressable cache. Carry over from v1 with no functional changes.
-BLAKE2s hashing, zstd compression with gzip fallback, deduplication.
+Content-addressable cache. BLAKE2s hashing, zstd compression with gzip
+fallback, deduplication. Stubs carry a check digit and retrieval verifies
+the content key, so corruption (in transit or on disk) is detectable.
 
 ### `ccm-get.py`
 
@@ -283,7 +321,12 @@ ccm-get.py <key> --grep PATTERN
 ccm-get.py <key> --head N
 ccm-get.py <key> --tail N
 ccm-get.py <key> --lines A-B
+ccm-get.py <key> --symbol NAME    # function body via graph.db
+ccm-get.py --check                # verify a pasted stub is intact (stdin)
 ```
+
+User-facing refusals (bad/stale key, reason-gate) print to stderr but
+exit 0, so they do not trigger the parallel-batch cascade.
 
 ### `install.py`
 
@@ -369,6 +412,7 @@ with Bash helpers breaks that coupling.)
 | `PreToolUse:Edit`             | this project (block + redirect to `cch-edit`)                           |
 | `PreToolUse:Write`            | this project (block + redirect to `cch-write`)                          |
 | `PreToolUse:NotebookEdit`     | this project (block + redirect to `cch-edit` / `jq`)                    |
+| `PreToolUse:Agent`            | this project (pass; redirect code-structure Explore agents to `cairn-graph`) |
 | `UserPromptSubmit`            | Cairn (do not touch)                                                    |
 | `Stop`                        | Cairn (do not touch)                                                    |
 | `PostToolUse`                 | unused (do not introduce)                                               |
