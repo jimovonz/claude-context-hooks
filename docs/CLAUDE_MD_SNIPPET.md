@@ -78,6 +78,23 @@ line, including the wrapper chain that contains your own pattern, so
 (`echo $! > x.pid; kill "$(cat x.pid)"`) or exclude yourself
 (`pgrep -f foo | grep -v $$`).
 
+**`cch-batch.py` — run many independent commands concurrently in ONE
+tool call.** Pipe commands (one per line, blanks and `#`-comments
+skipped) to `cch-batch.py`; it runs them in parallel and emits one
+`===[ cch-batch i/n ]=== <cmd>` block per command, in input order.
+Nothing can cancel a sibling because it is a single call, and each
+command is shelled through the cache wrapper (large outputs become their
+own `[CCM_CACHED]` stubs; exit codes stay in-band). `--jobs N` caps
+concurrency (default 8); `--no-cache-wrap` uses plain `bash -c`.
+
+```bash
+cch-batch.py << 'BATCH_EOF'
+rg -n TODO src/
+fd -e py tests/
+git log --oneline -5
+BATCH_EOF
+```
+
 **Worked example — tracing a code path across multiple files:**
 
 Don't open the entry file and read top-to-bottom. Use the graph to jump
