@@ -2,9 +2,9 @@
 
 Lightweight Claude Code hook layer that minimises tool-output context cost
 by routing all data interaction through a single Bash data path. Built-in
-`Read`, `Grep`, `Glob`, `WebFetch`, `Edit`, `Write`, and `NotebookEdit`
-are blocked at the hook layer; `Read` of multimodal extensions is the only
-allowed built-in path. Bash output is RTK-compressed and large residuals
+`Read`, `Grep`, `Glob`, `WebFetch`, `Edit`, `Write`, `NotebookEdit`, and
+`Agent` are blocked/redirected at the hook layer; `Read` of multimodal
+extensions is the only allowed built-in path. Bash output is RTK-compressed and large residuals
 are cached for selective querying via `ccm-get.py`. Edits and writes go
 through `cch-edit` and `cch-write` helpers (Bash-routed) so the
 read-before-edit guard never fires.
@@ -58,13 +58,15 @@ your `~/.claude/CLAUDE.md` so the model knows how to route.
 | `hooks/intercept-edit.py`           | Block + redirect to `cch-edit` via Bash                         |
 | `hooks/intercept-write.py`          | Block + redirect to `cch-write` via Bash                        |
 | `hooks/intercept-notebookedit.py`   | Block + redirect to `cch-edit` / `jq` / `nbformat` via Bash     |
+| `hooks/intercept-agent.py`          | Redirect code-structure Explore agents to `cairn-graph`         |
 
 ### Bash-routed helpers
 
 | Path                          | Role                                                         |
 | ----------------------------- | ------------------------------------------------------------ |
-| `hooks/cache-wrap.py`         | Runs the inner command, caches + stubs output above threshold |
-| `hooks/ccm-get.py`            | Filtered cache retrieval (`--grep` / `--head` / `--tail` / `--lines`) |
+| `hooks/cache-wrap.py`         | Runs the inner command, caches + stubs output above threshold; fail-soft exit handling |
+| `hooks/cch-batch.py`          | Runs many commands concurrently in one tool call (fan-out, cascade-immune) |
+| `hooks/ccm-get.py`            | Filtered cache retrieval (`--grep` / `--head` / `--tail` / `--lines`); `--check` verifies a stub |
 | `hooks/cch-edit.py`           | Literal-string edit: exact match, uniqueness check, atomic write, unified diff |
 | `hooks/cch-write.py`          | Atomic file write from stdin; creates parent directories     |
 | `hooks/lib/ccm_cache.py`      | Content-addressable cache (BLAKE2s, zstd/gzip)               |
@@ -75,6 +77,7 @@ your `~/.claude/CLAUDE.md` so the model knows how to route.
 | ----------------------- | ------------------------------------------------------- |
 | `CCH_DISABLE=1`         | All hooks pass through (debug escape hatch)             |
 | `CCH_CACHE_THRESHOLD`   | Bytes threshold for caching Bash output (default 8000)  |
+| `CCH_PROPAGATE_EXIT=1`  | Restore raw Bash exit propagation (default: fail-soft — non-zero reported as 0 to the harness, real code carried in-band as `[exit N]`) |
 
 ## Tests
 
