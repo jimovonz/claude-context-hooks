@@ -15,6 +15,7 @@ equivalent.
 | Search file contents          | `rg -n PATTERN PATH` (with `-C`, `--type`, `-l` as needed) |
 | List files                    | `fd PATTERN PATH` / `find PATH -name 'GLOB' -type f` |
 | Fetch a URL                   | `curl -sSL URL` (pipe to `rtk html` for HTML→markdown) |
+| Run many commands at once     | pipe one-per-line to `cch-batch.py` (concurrent, one tool call — see below) |
 
 **Navigate code structure via Bash** (requires `crg build` once per repo):
 
@@ -64,13 +65,18 @@ as `--grep "."`. If filtering genuinely cannot serve the need, use
 
 **Parallel Bash calls are safe — batch freely.** The cache wrapper is
 fail-soft: a Bash command's non-zero exit is reported to the harness as
-success, so one call's benign failure (e.g. `grep` no-match → exit 1)
-never cancels its sibling calls in the same turn. The real exit code is
-preserved in-band: an `[exit N]` line on small output, or the stub's
-`exit:` field on cached output. So judge failure from `[exit N]` /
-`exit:` (and the command's own output) — not the absence of a tool
-error. Set `CCH_PROPAGATE_EXIT=1` to restore raw exit-code propagation if
-you need it. Wrapper-usage errors (bad argv) still propagate loudly.
+success, so one call's benign failure (`grep` no-match, `ls` missing
+path) never cancels its sibling calls in the same turn.
+
+**Because of that, a Bash tool call succeeding does NOT mean the command
+succeeded.** A real failure (failed `pytest`, `gcc` error) also reports
+success to the harness. Judge success from the output itself and the
+in-band exit code: an `[exit N]` line on small output, or the stub's
+`exit:` field on cached output. No `[exit N]` / `exit: 0` = the command
+returned 0.
+
+(Reference: `CCH_PROPAGATE_EXIT=1` restores raw exit propagation;
+wrapper-usage errors like bad argv still propagate loudly.)
 
 **`pkill -f` / `pgrep -f` self-match.** `-f` matches the whole command
 line, including the wrapper chain that contains your own pattern, so
