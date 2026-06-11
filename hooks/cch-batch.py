@@ -89,6 +89,19 @@ def main() -> int:
         return 0
 
     def runner(cmd: str) -> tuple[str, int]:
+        # Retrieval/wrapper invocations must never be re-wrapped: caching a
+        # ccm-get retrieval re-stubs content the caller just paid to retrieve
+        # (recursive stubbing). Mirrors intercept-bash PASSTHROUGH_MARKERS.
+        if any(m in cmd for m in ('ccm-get.py', 'cache-wrap.py')):
+            try:
+                p = subprocess.run(['bash', '-c', cmd], stdout=subprocess.PIPE,
+                                   stderr=None, check=False)
+                out = p.stdout.decode('utf-8', 'replace')
+                if p.returncode != 0:
+                    out += f'\n[exit {p.returncode}]\n'
+                return out, 0
+            except Exception as e:
+                return f'[cch-batch: failed: {e}]\n', 1
         if args.no_cache_wrap:
             try:
                 p = subprocess.run(['bash', '-c', cmd], stdout=subprocess.PIPE,
