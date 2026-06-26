@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
 """
 PreToolUse:Grep — block, redirect to `rg` via Bash so output flows
-through the cache-wrap pipeline.
+through the cache-wrap pipeline. Falls back to POSIX `grep` when
+ripgrep is not installed so the redirect never dead-ends.
 """
 
 import json
 import os
+import shutil
 import sys
 from pathlib import Path
 
@@ -13,9 +15,20 @@ sys.path.insert(0, str(Path(__file__).parent))
 
 from lib.event_log import log_event
 
-REASON = (
-    "BLOCKED: Use rg -n PATTERN PATH (or cairn-graph --callers/--tests/--location SYMBOL)."
-)
+
+def _reason() -> str:
+    """Suggest rg when it is on PATH, else fall back to POSIX grep so a
+    machine without ripgrep still gets a runnable redirect."""
+    if shutil.which('rg'):
+        return (
+            "BLOCKED: Use rg -n PATTERN PATH "
+            "(or cairn-graph --callers/--tests/--location SYMBOL)."
+        )
+    return (
+        "BLOCKED: Use grep -rn PATTERN PATH "
+        "(or cairn-graph --callers/--tests/--location SYMBOL). "
+        "[ripgrep not on PATH — install it for RTK compression]"
+    )
 
 
 def main() -> int:
@@ -32,7 +45,7 @@ def main() -> int:
         'hookSpecificOutput': {
             'hookEventName': 'PreToolUse',
             'permissionDecision': 'deny',
-            'permissionDecisionReason': REASON,
+            'permissionDecisionReason': _reason(),
         }
     }
     json.dump(response, sys.stdout)

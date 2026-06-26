@@ -145,9 +145,11 @@ def test_install_idempotent_on_claude_md(tmp_path):
 
 
 def test_install_no_instructions_flag_skips_claude_md(tmp_path):
-    _run(['--no-instructions'], tmp_path)
-    claude_md = tmp_path / '.claude' / 'CLAUDE.md'
-    assert not claude_md.exists()
+    _run(["--no-instructions"], tmp_path)
+    claude_md = tmp_path / ".claude" / "CLAUDE.md"
+    # RTK init writes @RTK.md even with --no-instructions; our block should be absent
+    body = claude_md.read_text() if claude_md.exists() else ""
+    assert "BEGIN claude-context-hooks routing policy" not in body
 
 
 def test_remove_strips_claude_md_block_preserving_user_content(tmp_path):
@@ -164,8 +166,11 @@ def test_remove_strips_claude_md_block_preserving_user_content(tmp_path):
 
 def test_remove_deletes_claude_md_when_only_our_block(tmp_path):
     _run([], tmp_path)
-    _run(['--remove'], tmp_path)
-    assert not (tmp_path / '.claude' / 'CLAUDE.md').exists()
+    _run(["--remove"], tmp_path)
+    # RTK init leaves @RTK.md in CLAUDE.md; our routing block should be removed
+    claude_md = tmp_path / ".claude" / "CLAUDE.md"
+    body = claude_md.read_text() if claude_md.exists() else ""
+    assert "BEGIN claude-context-hooks routing policy" not in body
 
 
 def test_install_creates_bin_symlinks(tmp_path):
@@ -230,5 +235,6 @@ def test_check_only(tmp_path):
     assert rc == 0
     assert 'python_310' in out
     assert 'rtk_on_path' in out
+    assert 'search_tools' in out
     # No installation
     assert not (tmp_path / '.claude' / 'hooks').exists()
