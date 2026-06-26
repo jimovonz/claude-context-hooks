@@ -34,6 +34,10 @@ _CODE_STRUCTURE_PATTERNS = [
         r"read\s+(?:all|every|each)\s+(?:python|source|code)\s+files?\b",
         r"(?:explore|analyze|analyse)\s+(?:the\s+)?(?:hook|intercept|codebase|code\s+structure)",
         r"(?:understand|inspect)\s+(?:how|the)\s+(?:\w+\s+)*(?:hooks?|intercepts?|enforce\w*|routing)",
+        r"(?:blast.?radius|impact)\s+(?:of|for)\s+\w+",
+        r"what\s+(?:does|is)\s+\w+\s+(?:call(?:ing)?|import(?:ing)?)\b",
+        r"(?:repo|module|codebase)\s+(?:summary|overview|orientation|map|structure)\b",
+        r"(?:key\s+)?(?:entry.?points?|hot\s+paths?|high.?fan.?in)\b",
     ]
 ]
 

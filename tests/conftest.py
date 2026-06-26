@@ -33,6 +33,16 @@ def run_hook(tmp_path, monkeypatch):
     def _run(hook_path: Path, payload: dict, env=None, decode_json=True):
         environ = os.environ.copy()
         environ['HOME'] = str(tmp_path)
+        # Add cairn venv bin to PATH so cairn-graph is findable in tests
+        for candidate in (
+            os.environ.get('CAIRN_HOME', ''),
+            os.path.expanduser('~/Projects/cairn'),
+            '/mnt/ssd/Projects/cairn',
+        ):
+            venv_bin = os.path.join(candidate, '.venv', 'bin')
+            if candidate and os.path.isdir(venv_bin):
+                environ['PATH'] = venv_bin + os.pathsep + environ.get('PATH', '')
+                break
         if env:
             environ.update(env)
         proc = subprocess.run(
