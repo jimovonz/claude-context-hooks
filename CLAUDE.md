@@ -1,9 +1,15 @@
 # claude-context-hooks
 
-**State: v2.0.0 shipped 2026-05-02.**
-Tagged `v2.0.0` on commit `e192fa6`, pushed to
+**State: v2.1.0 shipped 2026-06-26.**
+Tagged `v2.1.0` (builds on `v2.0.0` at `e192fa6`), repo
 [`jimovonz/claude-context-hooks`](https://github.com/jimovonz/claude-context-hooks).
 Installed locally and operational.
+
+v2.1.0 adds: installer auto-provisions its binary deps (RTK, ripgrep, fd)
+rather than assuming them; `intercept-grep.py` / `intercept-glob.py` choose
+their redirect at runtime (`rg`/`fd` when present, else POSIX `grep`/`find`)
+so the suggestion never dead-ends; Agent hook routes more code-structure
+prompts to `cairn-graph`.
 
 ## What this is
 
@@ -28,8 +34,8 @@ questions. Read it before changing direction.
 
 ## Where we are right now
 
-- v2.0.0 tagged at `e192fa6`, pushed to GitHub `main`.
-- All 101 tests pass.
+- v2.1.0 tagged on `main`; v2.0.0 was `e192fa6`.
+- All 242 tests pass.
 - Installed locally: 14 symlinks in `~/.claude/hooks/`, 3 helper
   symlinks in `~/.local/bin/` (`cch-edit.py`, `cch-write.py`,
   `ccm-get.py`), 8 PreToolUse entries in `~/.claude/settings.json`.
@@ -108,9 +114,14 @@ Below that, enforcement is too lax; above, it's too aggressive. Cold-start
 sessions naturally see more before the CLAUDE.md routing snippet
 internalises.
 
-## Dependencies (user prerequisite, not auto-installed)
+## Dependencies
 
-- [RTK](https://github.com/rtk-ai/rtk) with its Claude Code Bash hook active
+Best-effort auto-installed by `install.py` (skippable; falls back gracefully):
+- [RTK](https://github.com/rtk-ai/rtk) — downloaded + `rtk init` run, unless `--skip-rtk`
+- `ripgrep` + `fd` — via the system package manager, unless `--skip-search-tools`
+  (Grep/Glob hooks fall back to `grep`/`find` when absent)
+
+User prerequisite (not auto-installed):
 - [Cairn](https://github.com/jimovonz/cairn) with UserPromptSubmit + Stop hooks
 - Python 3.10+
 - Claude Code with `hookSpecificOutput.updatedInput` support
