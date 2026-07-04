@@ -18,6 +18,7 @@ equivalent.
 | Scrape a JS-rendered page     | `cch-html.py --url URL` (auto-escalates: static → embedded JSON → headless render) |
 | Slice a page structurally     | `cch-html.py --url URL --select "main article"` (tag / #id / .class / descendants) |
 | Read a local HTML file        | `cch-html.py FILE` or pipe to stdin (READ-ONLY view — never use before editing; edit HTML source raw via `cat` + `cch-edit.py`) |
+| Project rules by file pattern | drop `.cch/rules/*.md` with `globs:` frontmatter — the rule body auto-appends (once per session) to output of any command touching a matching file |
 | Run many commands at once     | pipe one-per-line to `cch-batch.py` (concurrent, one tool call — see below) |
 
 **cch-html — when and when not.** It is a READ tool for page *content*.

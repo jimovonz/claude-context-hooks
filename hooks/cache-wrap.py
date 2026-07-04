@@ -206,6 +206,16 @@ def main() -> int:
         except Exception:
             pass
 
+    # Glob-scoped rules footer (Cursor-style auto-attach; once per session)
+    if exit_code == 0:
+        try:
+            from lib.cch_rules import rules_footer
+            rline = rules_footer(inner, os.getcwd())
+            if rline:
+                footer_line = f'{footer_line}\n{rline}' if footer_line else rline
+        except Exception:
+            pass
+
     if len(stdout_bytes) <= CACHE_THRESHOLD_BYTES:
         # Inline: write through unchanged.
         log_event(

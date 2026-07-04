@@ -333,6 +333,21 @@ converted page often returns inline with no stub round-trip. Local file
 reads are NEVER converted (a converted view would poison literal-match
 editing).
 
+### `lib/cch_rules.py`
+
+Glob-scoped rules (Cursor's "Auto Attached" pattern, adapted): rule files
+in `<project>/.cch/rules/*.md` carry `globs:` frontmatter; when a wrapped
+command touches a matching file, the rule body rides the existing footer
+channel in cache-wrap — once per session per rule (marker-file dedupe in
+`~/.claude/cache/cch/rules-seen/`, day-scoped fallback when no session id).
+The session id is threaded by intercept-bash as a `CCH_SESSION_ID=…` env
+prefix on the rewritten command. Matching is fnmatch against the
+project-relative path and basename (`*` crosses directories, lenient).
+Known limitation: `cd X && cat rel` resolves candidates against the
+wrapper's cwd, so such commands degrade to no-injection (never a wrong
+injection). Import in cache-wrap is lazy inside try/except per the
+bare-import Bash-death rule.
+
 ### `lib/ccm_cache.py`
 
 Content-addressable cache. BLAKE2s hashing, zstd compression with gzip

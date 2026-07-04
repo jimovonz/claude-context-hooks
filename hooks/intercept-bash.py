@@ -301,7 +301,9 @@ def main() -> int:
         sys.stdout.write('\n')
         return 0
 
-    wrapped = f'{WRAPPER_PATH} -- {shlex.quote(cmd)}'
+    sid = str(data.get('session_id') or '')[:36]
+    env_prefix = f'CCH_SESSION_ID={shlex.quote(sid)} ' if sid else ''
+    wrapped = f'{env_prefix}{WRAPPER_PATH} -- {shlex.quote(cmd)}'
 
     response = {
         'hookSpecificOutput': {
