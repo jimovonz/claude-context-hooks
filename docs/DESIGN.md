@@ -314,6 +314,25 @@ lost-update each other. Only writers serialize — a reader of the same
 path in the same batch may observe pre-edit content. The guard
 accommodates natural LLM batching instead of policing it.
 
+### `cch-html.py`
+
+Read-side HTML→text converter with an escalation ladder for JS-rendered
+pages: (1) static fetch + convert (covers SSR/SSG), (2) embedded JSON
+island extraction (`__NEXT_DATA__` / `__INITIAL_STATE__` / `ld+json`),
+(3) rendered DOM via `google-chrome --headless=new --dump-dom
+--virtual-time-budget` — no node/puppeteer dependency. JS shells are
+detected (near-zero text, many scripts) and self-diagnosed rather than
+silently cached as junk. `--select` slices by a simple selector subset
+(tag, `#id`, `.class`, descendant chains) — the DOM-as-graph analogue of
+`ccm-get --symbol`.
+
+`cache-wrap.py` invokes it automatically when a command matches network
+provenance (`curl`/`wget`), the output sniffs as HTML, and it exceeds the
+cache threshold — conversion runs BEFORE the threshold check, so a
+converted page often returns inline with no stub round-trip. Local file
+reads are NEVER converted (a converted view would poison literal-match
+editing).
+
 ### `lib/ccm_cache.py`
 
 Content-addressable cache. BLAKE2s hashing, zstd compression with gzip

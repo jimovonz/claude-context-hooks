@@ -14,7 +14,9 @@ sys.path.insert(0, str(Path(__file__).parent))
 from lib.event_log import log_event
 
 REASON = (
-    "BLOCKED: Use curl -sSL URL (pipe to rtk html for pages)."
+    "BLOCKED: Use curl -sSL URL — large HTML auto-converts to readable text. "
+    "JS-rendered page? cch-html.py --url URL (escalates to headless render). "
+    "Need raw markup? wget -qO /tmp/page.html URL then read the file."
 )
 
 

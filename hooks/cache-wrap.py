@@ -130,6 +130,39 @@ def _reported_code(inner_exit: int) -> int:
     return inner_exit if PROPAGATE_EXIT else 0
 
 
+
+_NETWORK_FETCH_RE = None
+
+
+def _maybe_convert_html(inner: str, stdout_bytes: bytes, exit_code: int) -> bytes:
+    """Convert large HTML from curl/wget through cch-html.py (fail-open)."""
+    global _NETWORK_FETCH_RE
+    import re as _re
+    if _NETWORK_FETCH_RE is None:
+        _NETWORK_FETCH_RE = _re.compile(r'\b(curl|wget)\b')
+    if exit_code != 0 or len(stdout_bytes) <= CACHE_THRESHOLD_BYTES:
+        return stdout_bytes
+    if not _NETWORK_FETCH_RE.search(inner):
+        return stdout_bytes
+    head = stdout_bytes[:512].lstrip().lower()
+    if not (head.startswith(b'<!doctype html') or head.startswith(b'<html') or b'<html' in head):
+        return stdout_bytes
+    converter = Path(__file__).resolve().parent / 'cch-html.py'
+    if not converter.exists():
+        return stdout_bytes
+    try:
+        proc = subprocess.run(
+            [sys.executable, str(converter)],
+            input=stdout_bytes, stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL, timeout=20,
+        )
+        converted = proc.stdout or b''
+        if proc.returncode == 0 and len(converted.strip()) > 0 and len(converted) < len(stdout_bytes):
+            return converted
+    except Exception:
+        pass
+    return stdout_bytes
+
 def main() -> int:
     # Argv: cache-wrap.py -- <inner command...>
     if len(sys.argv) < 3 or sys.argv[1] != '--':
@@ -158,6 +191,12 @@ def main() -> int:
 
     stdout_bytes = proc.stdout or b''
     exit_code = proc.returncode
+
+    # HTML auto-convert (read-side only): network-fetch provenance + HTML
+    # sniff + above threshold. Local file reads are NEVER converted — a
+    # converted view would poison literal-match editing. Conversion runs
+    # BEFORE the threshold check so a converted page may return inline.
+    stdout_bytes = _maybe_convert_html(inner, stdout_bytes, exit_code)
 
     # Generate cairn-graph footer for code-file reads (best-effort)
     footer_line = None
