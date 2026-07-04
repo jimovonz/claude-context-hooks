@@ -306,6 +306,14 @@ by construction — and it gives real wall-clock parallelism for deliberate
 fan-out. `--jobs N` caps concurrency (default 8); `--no-cache-wrap` runs
 each command via plain `bash -c`.
 
+**Same-file guard.** Multiple `cch-edit.py`/`cch-write.py` commands
+targeting the same file are auto-serialized in input order (marked in the
+output); commands on different files stay parallel. Concurrent writers
+previously raced on the shared `.cch-tmp` staging file and could
+lost-update each other. Only writers serialize — a reader of the same
+path in the same batch may observe pre-edit content. The guard
+accommodates natural LLM batching instead of policing it.
+
 ### `lib/ccm_cache.py`
 
 Content-addressable cache. BLAKE2s hashing, zstd compression with gzip

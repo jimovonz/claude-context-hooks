@@ -32,9 +32,17 @@ Usage:
 Output: one delimited block per command, in input order, each labelled
 with its index and command. cch-batch itself always exits 0 (the whole
 point is that nothing it runs can cancel anything).
+
+Same-file guard: multiple cch-edit.py / cch-write.py commands that target
+the SAME file are automatically run sequentially in input order (commands
+touching different files still run in parallel). Concurrent writers to one
+path previously raced on the shared .cch-tmp staging file and could
+lost-update each other (cairn: corrupted booking-widget.tsx). Batch freely;
+the guard makes the natural batching behavior safe instead of policing it.
 """
 import argparse
 import os
+import shlex
 import subprocess
 import sys
 from concurrent.futures import ThreadPoolExecutor
@@ -111,15 +119,61 @@ def main() -> int:
                 return f'[cch-batch: failed: {e}]\n', 1
         return _run_one(cmd)
 
-    # Run concurrently, preserve input order in output.
-    jobs = max(1, min(args.jobs, len(commands)))
+    # Same-file guard: cch-edit/cch-write commands hitting one path are
+    # chained in input order; everything else stays fully parallel.
+    def target_file(cmd: str) -> str | None:
+        try:
+            toks = shlex.split(cmd)
+        except ValueError:
+            return None
+        for i, t in enumerate(toks):
+            base = os.path.basename(t)
+            if base not in ('cch-edit.py', 'cch-write.py'):
+                continue
+            j = i + 1
+            while j < len(toks):
+                tok = toks[j]
+                if tok in ('--old-file', '--new-file'):
+                    j += 2  # flag consumes a value
+                    continue
+                if tok.startswith('-'):
+                    j += 1
+                    continue
+                if tok in ('<<', '<', '<<<'):
+                    return None  # redirection reached before a path
+                return os.path.abspath(tok)
+            return None
+        return None
+
+    keys = [target_file(c) for c in commands]
+    chains: list[list[int]] = []          # units of work, each run in order
+    chain_of_key: dict[str, list[int]] = {}
+    for idx, key in enumerate(keys):
+        if key is not None and key in chain_of_key:
+            chain_of_key[key].append(idx)
+        else:
+            unit = [idx]
+            if key is not None:
+                chain_of_key[key] = unit
+            chains.append(unit)
+    serialized = {i for unit in chains if len(unit) > 1 for i in unit}
+
+    def run_chain(unit: list[int]) -> list[tuple[str, int]]:
+        return [runner(commands[i]) for i in unit]
+
+    jobs = max(1, min(args.jobs, len(chains)))
+    results: list[tuple[str, int]] = [('', 0)] * len(commands)
     with ThreadPoolExecutor(max_workers=jobs) as pool:
-        results = list(pool.map(runner, commands))
+        for unit, unit_results in zip(chains, pool.map(run_chain, chains)):
+            for i, res in zip(unit, unit_results):
+                results[i] = res
 
     n = len(commands)
     out = sys.stdout
     for i, (cmd, (text, rc)) in enumerate(zip(commands, results), 1):
         out.write(f'===[ cch-batch {i}/{n} ]=== {cmd}\n')
+        if (i - 1) in serialized:
+            out.write('[cch-batch: same-file guard — ran sequentially in input order]\n')
         out.write(text)
         if text and not text.endswith('\n'):
             out.write('\n')

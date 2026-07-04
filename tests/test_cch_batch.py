@@ -105,3 +105,63 @@ def test_failing_command_does_not_sink_batch(tmp_path):
     assert rc == 0
     assert 'before' in out
     assert 'after' in out
+
+
+HOOKS = Path(__file__).resolve().parent.parent / 'hooks'
+
+
+def test_same_file_edits_serialized_no_lost_updates(tmp_path):
+    """Regression for the sibnb booking-widget corruption: N cch-edit calls
+    to ONE file in a single batch must all land (previously they raced on
+    the shared .cch-tmp staging file and lost updates)."""
+    target = tmp_path / 'code.txt'
+    target.write_text(''.join(f'line-{i} original\n' for i in range(6)))
+    edit = HOOKS / 'cch-edit.py'
+    stdin = ''.join(
+        f"python3 {edit} {target} 'line-{i} original' 'line-{i} EDITED'\n"
+        for i in range(6)
+    )
+    rc, out, err = _run(stdin, tmp_path)
+    assert rc == 0
+    content = target.read_text()
+    for i in range(6):
+        assert f'line-{i} EDITED' in content, f'edit {i} was lost:\n{out}'
+    assert 'original' not in content
+    assert 'same-file guard' in out
+
+
+def test_same_file_writes_last_wins_deterministically(tmp_path):
+    target = tmp_path / 'w.txt'
+    write = HOOKS / 'cch-write.py'
+    stdin = (
+        f"echo FIRST | python3 {write} {target}\n"
+        f"echo SECOND | python3 {write} {target}\n"
+    )
+    rc, out, err = _run(stdin, tmp_path)
+    assert rc == 0
+    assert target.read_text().strip() == 'SECOND'
+
+
+def test_different_files_stay_parallel(tmp_path):
+    """The guard must not serialize edits to DIFFERENT files."""
+    a, b = tmp_path / 'a.txt', tmp_path / 'b.txt'
+    a.write_text('aaa\n'); b.write_text('bbb\n')
+    edit = HOOKS / 'cch-edit.py'
+    stdin = (
+        f"python3 {edit} {a} aaa AAA\n"
+        f"python3 {edit} {b} bbb BBB\n"
+    )
+    rc, out, err = _run(stdin, tmp_path)
+    assert rc == 0
+    assert a.read_text().strip() == 'AAA'
+    assert b.read_text().strip() == 'BBB'
+    assert 'same-file guard' not in out
+
+
+def test_guard_ignores_non_edit_commands_mentioning_same_path(tmp_path):
+    """Plain reads of one file are not writers — no serialization marker."""
+    f = tmp_path / 'r.txt'
+    f.write_text('hello\n')
+    rc, out, err = _run(f'cat {f}\ncat {f}\n', tmp_path)
+    assert rc == 0
+    assert 'same-file guard' not in out

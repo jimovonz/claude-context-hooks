@@ -65,7 +65,7 @@ your `~/.claude/CLAUDE.md` so the model knows how to route.
 | Path                          | Role                                                         |
 | ----------------------------- | ------------------------------------------------------------ |
 | `hooks/cache-wrap.py`         | Runs the inner command, caches + stubs output above threshold; fail-soft exit handling |
-| `hooks/cch-batch.py`          | Runs many commands concurrently in one tool call (fan-out, cascade-immune) |
+| `hooks/cch-batch.py`          | Runs many commands concurrently in one tool call (fan-out, cascade-immune, same-file writes auto-serialized) |
 | `hooks/ccm-get.py`            | Filtered cache retrieval (`--grep` / `--head` / `--tail` / `--lines`); `--check` verifies a stub |
 | `hooks/cch-edit.py`           | Literal-string edit: exact match, uniqueness check, atomic write, unified diff |
 | `hooks/cch-write.py`          | Atomic file write from stdin; creates parent directories     |

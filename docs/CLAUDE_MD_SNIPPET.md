@@ -101,6 +101,15 @@ git log --oneline -5
 BATCH_EOF
 ```
 
+**Same-file guard (built in):** multiple `cch-edit.py`/`cch-write.py`
+commands targeting the SAME file in one batch are auto-serialized in
+input order (marked `[cch-batch: same-file guard …]` in the output), so
+batching many edits to one file is safe. Different files still run in
+parallel. Only writers serialize — a reader (`rg`/`cat`) of that file in
+the same batch may see pre-edit content. Note the input is still
+line-oriented: multi-line quoted args cannot be batched; use
+`cch-edit.py --old-file/--new-file` for multi-line edits.
+
 **Worked example — tracing a code path across multiple files:**
 
 Don't open the entry file and read top-to-bottom. Use the graph to jump
