@@ -14,8 +14,26 @@ equivalent.
 | Inspect a text file           | `cat PATH` / `head -n N PATH` / `sed -n 'A,Bp' PATH` |
 | Search file contents          | `rg -n PATTERN PATH` (with `-C`, `--type`, `-l` as needed) |
 | List files                    | `fd PATTERN PATH` / `find PATH -name 'GLOB' -type f` |
-| Fetch a URL                   | `curl -sSL URL` (pipe to `rtk html` for HTML→markdown) |
+| Fetch a URL                   | `curl -sSL URL` (large HTML output auto-converts to text via cch-html) |
+| Scrape a JS-rendered page     | `cch-html.py --url URL` (auto-escalates: static → embedded JSON → headless render) |
+| Slice a page structurally     | `cch-html.py --url URL --select "main article"` (tag / #id / .class / descendants) |
+| Read a local HTML file        | `cch-html.py FILE` or pipe to stdin (READ-ONLY view — never use before editing; edit HTML source raw via `cat` + `cch-edit.py`) |
+| Project rules by file pattern | drop `.cch/rules/*.md` with `globs:` frontmatter — the rule body auto-appends (once per session) to output of any command touching a matching file |
 | Run many commands at once     | pipe one-per-line to `cch-batch.py` (concurrent, one tool call — see below) |
+
+**cch-html — when and when not.** It is a READ tool for page *content*.
+Use it when you want what a page *says* (articles, docs, listings, any
+remote page). Do NOT use it when you need the actual markup — attributes,
+meta/OG tags, JSON-LD, exact HTML for citation — fetch raw instead:
+`wget -qO /tmp/page.html URL` then read the file (file reads are never
+converted). Do NOT use it on any file you may edit (converted text will
+not literal-match the source; use `cat` + `cch-edit.py`). And do not
+bother for quick membership checks — `curl URL | grep -o STRING` is
+already optimal and bypasses conversion naturally. `--select` supports
+only tag / `#id` / `.class` / descendant chains — a no-match on fancier
+CSS (`>`, `[attr]`, `:pseudo`) means unsupported syntax, not absent
+content.
+
 
 **Navigate code structure via Bash** (requires `crg build` once per repo):
 
@@ -100,6 +118,15 @@ fd -e py tests/
 git log --oneline -5
 BATCH_EOF
 ```
+
+**Same-file guard (built in):** multiple `cch-edit.py`/`cch-write.py`
+commands targeting the SAME file in one batch are auto-serialized in
+input order (marked `[cch-batch: same-file guard …]` in the output), so
+batching many edits to one file is safe. Different files still run in
+parallel. Only writers serialize — a reader (`rg`/`cat`) of that file in
+the same batch may see pre-edit content. Note the input is still
+line-oriented: multi-line quoted args cannot be batched; use
+`cch-edit.py --old-file/--new-file` for multi-line edits.
 
 **Worked example — tracing a code path across multiple files:**
 

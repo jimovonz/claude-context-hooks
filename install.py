@@ -71,6 +71,7 @@ HOOK_FILES = [
     'lib/ccm_cache.py',
     'lib/event_log.py',
     'lib/cairn_graph_footer.py',
+    'lib/cch_rules.py',
     'cch-gain.py',
 ]
 

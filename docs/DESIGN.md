@@ -306,6 +306,48 @@ by construction — and it gives real wall-clock parallelism for deliberate
 fan-out. `--jobs N` caps concurrency (default 8); `--no-cache-wrap` runs
 each command via plain `bash -c`.
 
+**Same-file guard.** Multiple `cch-edit.py`/`cch-write.py` commands
+targeting the same file are auto-serialized in input order (marked in the
+output); commands on different files stay parallel. Concurrent writers
+previously raced on the shared `.cch-tmp` staging file and could
+lost-update each other. Only writers serialize — a reader of the same
+path in the same batch may observe pre-edit content. The guard
+accommodates natural LLM batching instead of policing it.
+
+### `cch-html.py`
+
+Read-side HTML→text converter with an escalation ladder for JS-rendered
+pages: (1) static fetch + convert (covers SSR/SSG), (2) embedded JSON
+island extraction (`__NEXT_DATA__` / `__INITIAL_STATE__` / `ld+json`),
+(3) rendered DOM via `google-chrome --headless=new --dump-dom
+--virtual-time-budget` — no node/puppeteer dependency. JS shells are
+detected (near-zero text, many scripts) and self-diagnosed rather than
+silently cached as junk. `--select` slices by a simple selector subset
+(tag, `#id`, `.class`, descendant chains) — the DOM-as-graph analogue of
+`ccm-get --symbol`.
+
+`cache-wrap.py` invokes it automatically when a command matches network
+provenance (`curl`/`wget`), the output sniffs as HTML, and it exceeds the
+cache threshold — conversion runs BEFORE the threshold check, so a
+converted page often returns inline with no stub round-trip. Local file
+reads are NEVER converted (a converted view would poison literal-match
+editing).
+
+### `lib/cch_rules.py`
+
+Glob-scoped rules (Cursor's "Auto Attached" pattern, adapted): rule files
+in `<project>/.cch/rules/*.md` carry `globs:` frontmatter; when a wrapped
+command touches a matching file, the rule body rides the existing footer
+channel in cache-wrap — once per session per rule (marker-file dedupe in
+`~/.claude/cache/cch/rules-seen/`, day-scoped fallback when no session id).
+The session id is threaded by intercept-bash as a `CCH_SESSION_ID=…` env
+prefix on the rewritten command. Matching is fnmatch against the
+project-relative path and basename (`*` crosses directories, lenient).
+Known limitation: `cd X && cat rel` resolves candidates against the
+wrapper's cwd, so such commands degrade to no-injection (never a wrong
+injection). Import in cache-wrap is lazy inside try/except per the
+bare-import Bash-death rule.
+
 ### `lib/ccm_cache.py`
 
 Content-addressable cache. BLAKE2s hashing, zstd compression with gzip

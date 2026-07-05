@@ -146,7 +146,7 @@ markers, written by `install.py`.
 | Inspect a text file                    | `cat PATH` / `head -n N PATH` / `sed -n 'A,Bp' PATH`                  |
 | Search file contents                   | `rg -n PATTERN PATH` (with `-C`, `--type`, `-l` as needed)            |
 | List files                             | `fd PATTERN PATH` / `find PATH -name 'GLOB' -type f`                  |
-| Fetch a URL                            | `curl -sSL URL` (pipe to `rtk html` for HTML→markdown)                |
+| Fetch a URL                            | `curl -sSL URL` (large HTML auto-converts to text via cch-html)       |
 | **Locate a symbol**                    | **`cairn-graph --location SYMBOL`**                                   |
 | **Callers / callees / tests of a symbol** | **`cairn-graph --callers SYMBOL` / `--callees` / `--tests`**       |
 | **Repo orientation**                   | **`cairn-graph --summary`**                                           |

@@ -26,6 +26,7 @@ import os
 import re
 import shlex
 import shutil
+import sqlite3
 import sys
 import tempfile
 from pathlib import Path
@@ -150,25 +151,122 @@ def _warn_bulk_sed(cmd: str) -> str | None:
     return _BULK_WARN_PREFIX.format(lines=lines, path=path)
 
 
-def _check_symbol_grep(cmd: str) -> str | None:
-    """Detect grep-for-symbol patterns. Returns redirect message or None.
-    Only fires once per session (marker file tracks).
+# rg -r / --replace footgun: in ripgrep, -r is --replace (it rewrites every
+# match in the printed output), NOT --recursive (rg already recurses by
+# default). A user carrying grep's -r=recursive habit will silently rewrite
+# matches to the REPLACEMENT text and misread the result. Warn (non-blocking).
+_RG_REPLACE_WARN = (
+    "[cch: rg -r / --replace REWRITES every match in the output "
+    "(ripgrep -r is --replace, NOT recursive; rg recurses by default). "
+    "If you meant recursive, drop -r.]"
+)
+
+
+def _warn_rg_replace(cmd: str) -> str | None:
+    """Return a warning prefix when rg is invoked with -r/--replace, else None."""
+    effective = re.sub(r'^rtk\s+', '', cmd.strip())
+    head = re.split(r'[|;&]', effective, 1)[0]
+    try:
+        toks = shlex.split(head)
+    except ValueError:
+        return None
+    if not toks or os.path.basename(toks[0]) != 'rg':
+        return None
+    for tok in toks[1:]:
+        if tok == '--':
+            break
+        if tok == '--replace' or tok.startswith('--replace='):
+            return _RG_REPLACE_WARN
+        # short-flag cluster containing r (e.g. -r, -rn); -r consumes an arg
+        if tok.startswith('-') and not tok.startswith('--') and 'r' in tok[1:]:
+            return _RG_REPLACE_WARN
+    return None
+
+
+def _graph_db_for(cwd: str) -> Path | None:
+    """Walk up from cwd to find .code-review-graph/graph.db."""
+    d = Path(cwd or '.').resolve()
+    while True:
+        candidate = d / '.code-review-graph' / 'graph.db'
+        if candidate.is_file():
+            return candidate
+        if d.parent == d:
+            return None
+        d = d.parent
+
+
+def _graph_answer(graph_db: Path, redirect_type: str, symbol: str) -> str | None:
+    """Answer a symbol query straight from graph.db, or None if unresolvable.
+
+    Only returns a string when the graph genuinely has the answer — a miss
+    must NOT block the grep (the graph may be stale or the language's edge
+    extraction thin, e.g. Kotlin call edges).
     """
-    if not shutil.which("cairn-graph"):
+    try:
+        conn = sqlite3.connect(str(graph_db))
+        conn.execute("PRAGMA busy_timeout=500")
+        if redirect_type == "location":
+            rows = conn.execute(
+                "SELECT file_path, line_start, line_end FROM nodes "
+                "WHERE name = ? AND kind IN ('Function', 'Class', 'Type') "
+                "ORDER BY line_start LIMIT 3",
+                (symbol,),
+            ).fetchall()
+            if rows:
+                locs = " · ".join(f"{f}:{a}-{b}" for f, a, b in rows)
+                return (
+                    f"graph: {symbol} → {locs}. "
+                    f"Body: sed -n 'A,Bp' on that span. "
+                    f"(grep skipped — rerun only if you need every text occurrence)"
+                )
+        elif redirect_type in ("callers", "tests", "callees"):
+            edge_kind = {"callers": "CALLS", "tests": "TESTED_BY",
+                         "callees": "CALLS"}[redirect_type]
+            col, other = (("target_qualified", "source_qualified")
+                          if redirect_type != "callees"
+                          else ("source_qualified", "target_qualified"))
+            rows = conn.execute(
+                f"SELECT DISTINCT {other} FROM edges "
+                f"WHERE kind = ? AND ({col} LIKE ? OR {col} = ? "
+                f"OR {col} LIKE ?) LIMIT 6",
+                (edge_kind, f"%::{symbol}", symbol, f"%.{symbol}"),
+            ).fetchall()
+            if rows:
+                names = " · ".join(r[0].rsplit("::", 1)[-1] for r in rows)
+                return (
+                    f"graph: {symbol} {redirect_type}: {names} "
+                    f"(cairn-graph --{redirect_type} {symbol} for locations; "
+                    f"grep skipped)"
+                )
         return None
-
-    if _SESSION_MARKER.exists():
+    except sqlite3.Error:
         return None
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
 
+
+def _check_symbol_grep(cmd: str, cwd: str = '') -> str | None:
+    """Detect grep-for-symbol patterns and answer them from the graph.
+
+    Resolves the symbol at hook time: a hit blocks the grep WITH the answer
+    (no redirect round-trip); a graph miss passes the grep through silently
+    (never redirect to a graph that cannot answer).
+    """
     for pattern, redirect_type in _PATTERNS:
         m = pattern.search(cmd)
-        if m:
-            symbol = next(g for g in m.groups() if g is not None)
-            try:
-                _SESSION_MARKER.touch()
-            except OSError:
-                pass
-            return _REDIRECT_TEMPLATES[redirect_type].format(symbol=symbol)
+        if not m:
+            continue
+        symbol = next(g for g in m.groups() if g is not None)
+        graph_db = _graph_db_for(cwd)
+        if graph_db is None:
+            return None
+        answer = _graph_answer(graph_db, redirect_type, symbol)
+        if answer:
+            return f"BLOCKED: {answer}"
+        return None
 
     return None
 
@@ -220,8 +318,15 @@ def main() -> int:
         log_event('warn_bulk_sed', cmd_head=cmd[:120])
         cmd = f'echo "{warn_msg}"; {cmd}'
 
-    # Detect symbol-lookup-via-grep and redirect to cairn-graph (once per session)
-    redirect = _check_symbol_grep(cmd)
+    # Soft-warn on the rg -r/--replace footgun (non-blocking — prepends warning)
+    warn_rg = _warn_rg_replace(cmd)
+    if warn_rg:
+        log_event('warn_rg_replace', cmd_head=cmd[:120])
+        cmd = f'echo "{warn_rg}"; {cmd}'
+
+    # Symbol-lookup-via-grep: answer from the graph at hook time (block with
+    # the answer); pass through silently when the graph cannot resolve it
+    redirect = _check_symbol_grep(cmd, data.get('cwd') or os.getcwd())
     if redirect:
         response = {
             'hookSpecificOutput': {
@@ -234,7 +339,9 @@ def main() -> int:
         sys.stdout.write('\n')
         return 0
 
-    wrapped = f'{WRAPPER_PATH} -- {shlex.quote(cmd)}'
+    sid = str(data.get('session_id') or '')[:36]
+    env_prefix = f'CCH_SESSION_ID={shlex.quote(sid)} ' if sid else ''
+    wrapped = f'{env_prefix}{WRAPPER_PATH} -- {shlex.quote(cmd)}'
 
     response = {
         'hookSpecificOutput': {

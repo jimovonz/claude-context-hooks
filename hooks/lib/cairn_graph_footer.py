@@ -162,10 +162,13 @@ def _resolve_functions(graph_db: Path, file_path: str,
 
     results = []
     for qn, name in nodes:
+        # Cross-file calls may carry bare/dotted targets (e.g. Kotlin), so
+        # count all match forms, not just the fully qualified one.
         callers = conn.execute(
             "SELECT COUNT(*) FROM edges "
-            "WHERE kind = 'CALLS' AND target_qualified = ?",
-            (qn,),
+            "WHERE kind = 'CALLS' AND (target_qualified = ? "
+            "OR target_qualified = ? OR target_qualified LIKE ?)",
+            (qn, name, f"%.{name}"),
         ).fetchone()[0]
         tests = conn.execute(
             "SELECT COUNT(*) FROM edges "
@@ -276,5 +279,43 @@ def generate_footer(command: str, cwd: str) -> Optional[str]:
             memories = _query_cairn(cairn_db, file_path, qns)
 
         return _format_footer(new_functions, memories)
+    except Exception:
+        return None
+
+
+def _file_symbols(graph_db: Path, file_path: str, cap: int = 12) -> list:
+    """Top-level symbols (name, span) for a file, in line order."""
+    conn = sqlite3.connect(str(graph_db))
+    try:
+        conn.execute("PRAGMA busy_timeout=500")
+        return conn.execute(
+            "SELECT name, line_start, line_end FROM nodes "
+            "WHERE file_path = ? AND kind IN ('Function', 'Class') "
+            "AND line_start IS NOT NULL AND line_end > line_start "
+            "ORDER BY line_start LIMIT ?",
+            (file_path, cap),
+        ).fetchall()
+    finally:
+        conn.close()
+
+
+def generate_symbol_menu(command: str, cwd: str) -> Optional[str]:
+    """Compact symbol menu for a cached code-file read, or None.
+
+    Rendered inside the [CCM_CACHED] stub so the model can retrieve one
+    symbol (ccm-get <key> --symbol NAME) instead of guessing line ranges.
+    """
+    try:
+        file_path = _extract_source_file(command, cwd)
+        if not file_path:
+            return None
+        graph_db = _find_graph_db(str(Path(file_path).parent))
+        if graph_db is None:
+            return None
+        rows = _file_symbols(graph_db, file_path)
+        if not rows:
+            return None
+        items = ' · '.join(f'{name} {a}-{b}' for name, a, b in rows)
+        return f'symbols: {items}'
     except Exception:
         return None
