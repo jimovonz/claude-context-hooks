@@ -151,6 +151,38 @@ def _warn_bulk_sed(cmd: str) -> str | None:
     return _BULK_WARN_PREFIX.format(lines=lines, path=path)
 
 
+# rg -r / --replace footgun: in ripgrep, -r is --replace (it rewrites every
+# match in the printed output), NOT --recursive (rg already recurses by
+# default). A user carrying grep's -r=recursive habit will silently rewrite
+# matches to the REPLACEMENT text and misread the result. Warn (non-blocking).
+_RG_REPLACE_WARN = (
+    "[cch: rg -r / --replace REWRITES every match in the output "
+    "(ripgrep -r is --replace, NOT recursive; rg recurses by default). "
+    "If you meant recursive, drop -r.]"
+)
+
+
+def _warn_rg_replace(cmd: str) -> str | None:
+    """Return a warning prefix when rg is invoked with -r/--replace, else None."""
+    effective = re.sub(r'^rtk\s+', '', cmd.strip())
+    head = re.split(r'[|;&]', effective, 1)[0]
+    try:
+        toks = shlex.split(head)
+    except ValueError:
+        return None
+    if not toks or os.path.basename(toks[0]) != 'rg':
+        return None
+    for tok in toks[1:]:
+        if tok == '--':
+            break
+        if tok == '--replace' or tok.startswith('--replace='):
+            return _RG_REPLACE_WARN
+        # short-flag cluster containing r (e.g. -r, -rn); -r consumes an arg
+        if tok.startswith('-') and not tok.startswith('--') and 'r' in tok[1:]:
+            return _RG_REPLACE_WARN
+    return None
+
+
 def _graph_db_for(cwd: str) -> Path | None:
     """Walk up from cwd to find .code-review-graph/graph.db."""
     d = Path(cwd or '.').resolve()
@@ -285,6 +317,12 @@ def main() -> int:
     if warn_msg:
         log_event('warn_bulk_sed', cmd_head=cmd[:120])
         cmd = f'echo "{warn_msg}"; {cmd}'
+
+    # Soft-warn on the rg -r/--replace footgun (non-blocking — prepends warning)
+    warn_rg = _warn_rg_replace(cmd)
+    if warn_rg:
+        log_event('warn_rg_replace', cmd_head=cmd[:120])
+        cmd = f'echo "{warn_rg}"; {cmd}'
 
     # Symbol-lookup-via-grep: answer from the graph at hook time (block with
     # the answer); pass through silently when the graph cannot resolve it

@@ -69,3 +69,23 @@ def test_quotes_command_with_special_chars(run_hook):
     # cache-wrap.py receives it intact via sys.argv[2].
     assert 'cache-wrap.py' in rewritten
     assert '--' in rewritten
+
+
+def _rewritten(run_hook, command):
+    rc, out, err = run_hook(HOOK, {'tool_input': {'command': command}})
+    assert rc == 0
+    return out['hookSpecificOutput']['updatedInput']['command']
+
+
+def test_warns_on_rg_replace_footgun(run_hook):
+    # `rg -rn PAT` is --replace=n, not recursive — the common grep-habit footgun.
+    assert 'rg -r / --replace REWRITES' in _rewritten(run_hook, 'rg -rn self src/foo.py')
+    assert 'rg -r / --replace REWRITES' in _rewritten(run_hook, 'rg --replace x foo .')
+    assert 'rg -r / --replace REWRITES' in _rewritten(run_hook, 'rg -i --replace=Q bar .')
+
+
+def test_no_rg_replace_warning_false_positives(run_hook):
+    # rg without -r (recursive is default) must not warn.
+    assert 'rg -r / --replace REWRITES' not in _rewritten(run_hook, 'rg -n self src/foo.py')
+    # grep -r IS legitimately recursive — must not warn.
+    assert 'rg -r / --replace REWRITES' not in _rewritten(run_hook, 'grep -rn self .')
