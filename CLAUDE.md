@@ -62,16 +62,33 @@ questions. Read it before changing direction.
   `cch-write`, `ccm-get`, `ssh-tool`), 9 PreToolUse entries in
   `~/.claude/settings.json`. No `CCH_CACHE_THRESHOLD` in the env block — the
   8000 default is the resolved value, so overriding it would be the regression.
-- Live smoke test 2026-05-02 confirmed: RTK rewrite + cache stub +
-  `ccm-get.py` slice retrieval + bare helper invocation + deny+redirect
-  on Read/WebFetch/Write all work. Edit deny is shadowed by the harness
-  read-before-edit guard but net effect (Edit unusable, must use
-  `cch-edit.py`) is identical.
+- Live smoke test 2026-07-30 (post-merge) confirmed: Read deny on `.py` and
+  allow on `.png`; Bash rewrite through `cache-wrap.py`; the `rg -r` warning
+  firing from `lib/guards.py`; `cch-html.py`, `cch-edit.py`, `ssh-tool.py`
+  executing from PATH; 4000-line output → stub → `ccm-get --lines` slice;
+  identical re-run → `[CCM_UNCHANGED]`; changed re-run → `[CCM_DELTA]`
+  emitting 111B against 18898B, with the supersession index written and the
+  superseded key still resolving through the chain; and `cch-edit.py`
+  writing *through* a symlink without replacing it — the data-loss fix
+  verified against its actual failure mode (this repo installs hooks as
+  symlinks). Edit deny stays shadowed by the harness read-before-edit guard,
+  but the net effect (Edit unusable, must use `cch-edit.py`) is identical.
 - RTK installed locally (v0.38.0, `~/.local/bin/rtk`); RTK's PreToolUse:Bash
   hook ordered before our cache wrapper in `~/.claude/settings.json`.
-- Stash `pre-repurpose snapshot of intercept-bash.py changes` (`stash@{0}`)
-  still present — pre-v2 snapshot of `intercept-bash.py`. Safe to drop
-  with `git stash drop stash@{0}` once you've confirmed v2 is solid.
+
+## Two machines, one history
+
+Development runs on two PCs (home and work) and neither sees the other's
+in-progress work, so **version-number gaps are expected, not errors** — a
+missing intermediate is almost always work that happened elsewhere, or a
+number claimed in a status header before the tag was cut.
+
+The invariant that keeps them consistent: **a version exists when its tag is
+on `origin`, not when CLAUDE.md says so.** Verify with
+`git ls-remote --tags origin`, never with local `git tag -l` (a local-only
+tag is invisible to the other machine, which is how a header can claim a
+release nothing else can see). Push tags with the commits that earn them:
+`git push --follow-tags`.
 
 ## Architecture in one breath
 
@@ -142,13 +159,14 @@ across turns. Transport is the filesystem; failure domains stay separate.
     round trips are. Volume belongs on the mechanisms that need NO extra
     turn: delta emission, passthrough, promoted symbol menus, and the graph
     answering symbol-greps at hook time.
-- **Threshold may be too high — reopen with visible-cost data.** Today's 8000
-  came from costing a retrieval round trip at ~500 tokens. Earlier measurement
-  of the actual JSONL round trip put it nearer 138–175 visible tokens, which
-  moves break-even to `(60 + 175) / (1 - 0.64)` ≈ 650 tokens ≈ **2.6 kB**, not
-  8 kB. The two differ on whether the model's own deliberation counts as part of
-  the turn cost. Resolve with `cch-gain --outline` once real traffic accumulates
-  rather than by re-deriving; the answer changes the threshold by 3x.
+  - *Considered and rejected: 2.6 kB.* Costing the round trip at only its
+    138–175 visible JSONL tokens moves break-even to
+    `(60 + 175) / (1 - 0.64)` ≈ 650 tokens ≈ 2.6 kB. That costing is the
+    wrong one: it counts the bytes of the retrieval turn but not the
+    deliberation the turn provokes, and deliberation is the larger half.
+    **8000 stands as the intended value** (2026-07-30, confirmed against the
+    local data). Only new `cch-gain --outline` evidence reopens it — not a
+    re-derivation from the same numbers.
 - **CLAUDE.md instruction snippet wording.** Iterate against real use.
   The current snippet covers helpers (`cch-edit`, `cch-write`) and the
   unconditional block on Edit/Write/NotebookEdit; correction rate from

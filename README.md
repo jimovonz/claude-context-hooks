@@ -71,6 +71,7 @@ your `~/.claude/CLAUDE.md` so the model knows how to route.
 | `hooks/ccm-get.py`            | Filtered cache retrieval (`--grep`/`--head`/`--tail`/`--lines`/`--symbol`/`--chars`); `--check` verifies a stub; `--budget`, `--prune` |
 | `hooks/cch-edit.py`           | Literal-string edit: exact match, uniqueness check, atomic write, unified diff; `--symbol NAME` replaces a graph-resolved span |
 | `hooks/cch-write.py`          | Atomic file write from stdin; creates parent directories     |
+| `hooks/ssh-tool.py`           | Persistent multiplexed SSH sessions (ControlMaster): `open`/`run`/`jobs`/`tail`/`tunnel`/`copy`/`close`. No per-turn reconnect or reauth; a plain wrapped Bash command, so it inherits RTK compression and cch caching |
 | `hooks/lib/ccm_cache.py`      | Content-addressable cache (BLAKE2s, zstd/gzip), TTL + size pruning |
 | `hooks/lib/guards.py`        | Command guards shared by the Bash hook and cch-batch (bulk-read block, graph answer, rg -r warning; one-shot overridable) |
 | `hooks/lib/atomic.py`        | Symlink-resolving atomic writes with unique staging files    |

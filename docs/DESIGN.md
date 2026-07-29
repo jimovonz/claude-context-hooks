@@ -362,6 +362,25 @@ converted page often returns inline with no stub round-trip. Local file
 reads are NEVER converted (a converted view would poison literal-match
 editing).
 
+### `ssh-tool.py`
+
+Remote work is the one place where the single-data-path argument cuts the
+other way. A one-off `ssh user@host cmd` is already a plain Bash command and
+already gets RTK compression plus the cache wrapper — nothing to fix. What
+costs context is *iteration*: every turn re-establishes the connection, and
+password or MFA reauth burns a round trip before any work happens.
+
+`ssh-tool.py` keeps an OpenSSH `ControlMaster` socket alive across turns:
+`open NAME user@host` once, then `run NAME -- CMD` per turn, plus `jobs`,
+`tail`, `tunnel`/`untunnel`, `copy`, `list`, `reset`, `close`. Because each
+`run` is still an ordinary wrapped Bash command, large remote output stubs
+and slices exactly like local output — no separate cache path, no new
+surface in the hook layer.
+
+It is a helper, not a hook: nothing intercepts `ssh`, and plain
+`ssh`/`sshpass` remain the right tool for anything one-off. The only
+enforcement claim is the routing snippet's recommendation.
+
 ### `lib/cch_rules.py`
 
 Glob-scoped rules (Cursor's "Auto Attached" pattern, adapted): rule files

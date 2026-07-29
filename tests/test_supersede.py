@@ -95,3 +95,52 @@ def test_supersession_is_recorded_by_a_real_re_read(tmp_path):
     entries = list(idx.iterdir()) if idx.exists() else []
     assert entries, 'a changed re-read should record supersession'
     assert entries[0].read_text().startswith('b2s:')
+
+
+# --- prune -------------------------------------------------------------
+# The index was the one store the review pass left unswept: blobs got TTL and
+# size caps, markers got nothing. Eviction here keys on blob-absence, because
+# may_elide() cannot fire without the old key's blob.
+
+def test_prune_keeps_entries_whose_old_blob_is_still_cached(index, monkeypatch):
+    monkeypatch.setattr(index, '_cached', lambda key: True)
+    index.record('b2s:aaaa', 'b2s:bbbb')
+    result = index.prune()
+    assert result['removed'] == 0
+    assert index.superseded_by('b2s:aaaa') == 'b2s:bbbb'
+
+
+def test_prune_drops_entries_whose_old_blob_is_gone(index, monkeypatch):
+    monkeypatch.setattr(index, '_cached', lambda key: False)
+    index.record('b2s:aaaa', 'b2s:bbbb')
+    result = index.prune()
+    assert result['removed'] == 1
+    assert index.superseded_by('b2s:aaaa') is None
+
+
+def test_prune_keeps_interior_links_of_a_live_chain(index, monkeypatch):
+    # K1->K2->K3 with only K1 still cached. Dropping K2 would truncate K1's
+    # chain and silently cost a legitimate elision.
+    monkeypatch.setattr(index, '_cached', lambda key: key == 'b2s:aaaa')
+    index.record('b2s:aaaa', 'b2s:bbbb')
+    index.record('b2s:bbbb', 'b2s:cccc')
+    index.prune()
+    assert index.chain('b2s:aaaa') == ['b2s:bbbb', 'b2s:cccc']
+
+
+def test_prune_falls_back_to_age_when_the_blob_lookup_is_unavailable(index, monkeypatch):
+    import time as _time
+    monkeypatch.setattr(index, '_blob_lookup_available', lambda: False)
+    monkeypatch.setattr(index, '_cached', lambda key: False)
+    index.record('b2s:aaaa', 'b2s:bbbb')
+    marker = index.SUPERSEDED_DIR / 'aaaa'
+    # Fresh marker survives even though _cached is False, because with no
+    # lookup we cannot tell absence from unreadability.
+    assert index.prune()['removed'] == 0
+    old = _time.time() - 30 * 86400
+    os.utime(marker, (old, old))
+    assert index.prune()['removed'] == 1
+
+
+def test_prune_on_a_missing_index_dir_is_not_an_error(index):
+    assert index.prune()['removed'] == 0

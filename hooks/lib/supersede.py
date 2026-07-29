@@ -21,11 +21,13 @@ proxy's transform must be deterministic across requests. A transform that
 changes its mind rebuilds the cached prefix every time it does.
 """
 import os
+import time
 from pathlib import Path
 from typing import Iterable, List, Optional
 
 SUPERSEDED_DIR = Path.home() / '.claude' / 'cache' / 'cch' / 'superseded'
 MAX_CHAIN = 8
+_PRUNE_TTL_DAYS = int(os.environ.get('CCH_CACHE_TTL_DAYS', '14'))
 
 
 def _hex(key: str) -> str:
@@ -83,6 +85,77 @@ def _cached(key: str) -> bool:
     try:
         from lib.ccm_cache import _find_blob_path
         return _find_blob_path(key) is not None
+    except Exception:
+        return False
+
+
+def prune(ttl_days: Optional[int] = None) -> dict:
+    """Drop index entries that can no longer authorise an elision.
+
+    `may_elide` requires `_cached(old_key)`, so once the old key's blob has
+    been evicted its marker is dead weight: no future call can return True
+    through it. That makes blob-absence — not age — the correct eviction
+    signal, and it needs no guess about how long a key stays in context.
+
+    Two guards:
+      * an entry whose old key is still cached is kept regardless of age;
+      * an entry that another entry POINTS AT is kept even when its own blob
+        is gone, because it is an interior link (K1->K2->K3) and dropping it
+        would truncate a live predecessor's chain.
+
+    ttl_days is a backstop for markers whose blob was never cached: past the
+    cutoff an unreferenced marker goes even if the blob lookup is unavailable.
+    """
+    ttl_days = _PRUNE_TTL_DAYS if ttl_days is None else ttl_days
+    cutoff = time.time() - ttl_days * 86400
+    try:
+        markers = [p for p in SUPERSEDED_DIR.iterdir() if p.is_file()]
+    except OSError:
+        return {'removed': 0, 'remaining': 0, 'ttl_days': ttl_days}
+
+    # Keys pointed at by some other entry: interior links of a live chain.
+    referenced = set()
+    for marker in markers:
+        try:
+            referenced.add(_hex(marker.read_text().strip()))
+        except OSError:
+            continue
+
+    # _cached() cannot distinguish "blob absent" from "cannot ask", and both
+    # return False, so decide which signal to trust ONCE up front rather than
+    # per marker: with the lookup available, absence is authoritative and age
+    # is irrelevant; without it, age is all we have.
+    lookup_ok = _blob_lookup_available()
+
+    removed = 0
+    for marker in markers:
+        if marker.name in referenced:
+            continue
+        if lookup_ok:
+            if _cached(f'b2s:{marker.name}'):
+                continue
+        else:
+            try:
+                if marker.stat().st_mtime >= cutoff:
+                    continue
+            except OSError:
+                continue
+        try:
+            marker.unlink()
+            removed += 1
+        except OSError:
+            continue
+
+    return {'removed': removed,
+            'remaining': max(0, len(markers) - removed),
+            'ttl_days': ttl_days}
+
+
+def _blob_lookup_available() -> bool:
+    """Can we actually ask the cache whether a blob exists?"""
+    try:
+        from lib.ccm_cache import _find_blob_path  # noqa: F401
+        return True
     except Exception:
         return False
 

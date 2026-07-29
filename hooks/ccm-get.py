@@ -27,6 +27,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent))
 
 from lib import budget
+from lib import supersede
 from lib.ccm_cache import (
     init_ccm_cache, retrieve_content, get_metadata, get_last_key,
     list_all_keys, get_cache_stats, verify_ccm_stub, prune_cache
@@ -239,6 +240,12 @@ def _cmd_prune(args) -> int:
           f"{result['remaining']} remain "
           f"({result['remaining_bytes'] / 1024 / 1024:.1f} MB). "
           f"TTL {result['ttl_days']}d, cap {result['max_mb']} MB.")
+    # The supersession index is separate storage with its own eviction rule
+    # (blob-absence, not age), and nothing else ever sweeps it — without this
+    # it grows one small file per changed re-read for the life of the machine.
+    sup = supersede.prune(ttl_days=args.ttl_days)
+    print(f"Supersession index: dropped {sup['removed']}, "
+          f"{sup['remaining']} remain.")
     return 0
 
 
