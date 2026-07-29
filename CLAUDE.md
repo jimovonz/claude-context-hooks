@@ -29,7 +29,17 @@ questions. Read it before changing direction.
 ## Where we are right now
 
 - v2.0.0 tagged at `e192fa6`, pushed to GitHub `main`.
-- All 101 tests pass.
+- Post-v2 review pass (2026-07): critical fixes + levers landed, 282 tests pass.
+  - **Fixed:** `cch-edit`/`cch-write` replaced symlinks and silently lost the
+    edit (this repo installs its hooks *as* symlinks); the warning prefix in
+    `intercept-bash` executed `$(...)` from a path token; `install.py` wiped
+    `settings.json` whole on a JSON parse error.
+  - **Closed:** `cch-batch` bypassed every guard; `PASSTHROUGH_MARKERS` matched
+    substrings; `_check_bulk_read` saw only the first pipe segment;
+    `_SESSION_MARKER` was dead so "rerun to override" was false.
+  - **Added:** shared `lib/guards.py`, `lib/atomic.py`, `lib/budget.py`,
+    `lib/delta.py`; cache TTL/size pruning; `cch-edit --symbol`;
+    session ids on every event; honest `cch-gain` accounting.
 - Installed locally: 14 symlinks in `~/.claude/hooks/`, 3 helper
   symlinks in `~/.local/bin/` (`cch-edit.py`, `cch-write.py`,
   `ccm-get.py`), 8 PreToolUse entries in `~/.claude/settings.json`.
@@ -66,25 +76,45 @@ remove or replace it.
 
 ## Immediate next steps
 
-1. Soak the design over real sessions — measure correction rate (target
-   ~1-2/session) and iterate the CLAUDE.md routing snippet wording.
-2. Optionally raise the cache threshold above 8KB once we see how often
-   small post-RTK Bash outputs trip it.
-3. Re-run `rtk discover --since 7` after a week of v2 use to confirm
-   coverage rose well above the 2.9% pre-install baseline.
-4. Sanity-check README still describes the v2 shape (helpers, PATH
-   exposure via `~/.local/bin`, read-before-edit rationale).
+1. Soak with session attribution on — `cch-gain.py` can finally report
+   corrections/session, so the ~1-2 acceptance target is measurable for the
+   first time. Everything logged before 2026-07 has no session id and is
+   excluded from the rates.
+2. Watch the delta hit rate (`cch-gain` AVOIDED row). If re-reads collapse
+   often, `CCH_DELTA_MIN_BYTES` (default 1000) can come down.
+2b. **Test the stub-index hypothesis with `cch-gain.py --outline`.** The
+   section outline ships but its value rests on an unverified bet: that an
+   index makes the model retrieve less, or more narrowly. The one prior
+   instance of that bet — the symbol menu — failed it (`--symbol` reached
+   0.4% of filter uses while grep took 38%). Decision rule: if `sections
+   index` shows no lower retrieval rate and no lower ret/src than `profile
+   only` after a few weeks of real traffic, do not extend the generators.
+3. Re-run `rtk discover --since 7` to confirm coverage rose above the 2.9%
+   pre-install baseline.
+4. Sanity-check README against the v2.1 shape (guards module, budget,
+   delta, `--symbol` edits).
 
 ## Open questions
 
-- **Cache threshold (initial tune set to 2KB, soaking).** v1 used 8KB.
-  Empirical `cch-gain.py --dist` over an early session showed RTK
-  shrinks most output below 8KB so the wrapper barely tripped (1/92
-  events). Set `CCH_CACHE_THRESHOLD=2000` in `~/.claude/settings.json`
-  env block — should catch ~10% of commands while staying well above
-  the ~550-byte break-even floor (visible-cost only). Watch
-  `cch-gain.py --retrieval` for orphan rate over the soak week; bump
-  back up if orphans >30%.
+- **Cache threshold — RESOLVED with data (2026-07): 8000.** Two analyses,
+  and only the second one asks the right question.
+  - *Coverage view (wrong objective):* p50 output is 89B, p90 744B, p99
+    6271B; the live 6000 threshold cached 1.6% of commands. Tuning to p90
+    to "catch ~10%" gives 750 — and is a mistake.
+  - *Break-even view (right objective):* over 1023 cached events, **84% are
+    retrieved at least once** and retrieval pulls back **64% of the bytes**
+    (23.0 MB produced, 14.7 MB still emitted). Caching only pays when
+    `original − returned − stub − turn_cost > 0`. At a realistic ~500-token
+    retrieval turn, every bucket **below 8KB is net negative** (2–4KB alone:
+    −450 kB); 8–16KB breaks even; >64KB is overwhelmingly positive
+    (+5.9 MB from 40 events).
+  - So the original 8000 default was right, and both the 2000 "tune" and the
+    750 p90 value were regressions. A cache threshold is a break-even
+    question, never a percentile question.
+  - Corollary: at a median of 89B, payload size is not where the tokens go —
+    round trips are. Volume belongs on the mechanisms that need NO extra
+    turn: delta emission, passthrough, promoted symbol menus, and the graph
+    answering symbol-greps at hook time.
 - **CLAUDE.md instruction snippet wording.** Iterate against real use.
   The current snippet covers helpers (`cch-edit`, `cch-write`) and the
   unconditional block on Edit/Write/NotebookEdit; correction rate from

@@ -38,7 +38,7 @@ def _now_iso():
 def test_empty_log_zero_savings(tmp_path):
     rc, out, err = _run([], tmp_path)
     assert rc == 0
-    assert 'Total honest savings: ~0 tokens' in out
+    assert 'Net observed:' in out
 
 
 def test_cache_wrap_savings_counted(tmp_path):
@@ -57,10 +57,10 @@ def test_cache_wrap_savings_counted(tmp_path):
     assert cw['cmds'] == 2
     assert cw['cached'] == 1
     assert cw['original_bytes'] == 100_050
-    # Big cmd: stub 200; small cmd: counted as original (no saving)
-    assert cw['stub_bytes'] == 200 + 50
-    # Saved = 100_050 - 250 = 99_800 bytes -> ~24_950 tokens
-    saved = cw['original_bytes'] - cw['stub_bytes']
+    # Big cmd: stub 200; small cmd: emitted in full (no saving)
+    assert cw['emitted_bytes'] == 200 + 50
+    # Avoided = 100_050 - 250 = 99_800 bytes -> ~24_950 tokens
+    saved = cw['original_bytes'] - cw['emitted_bytes']
     assert saved == 99_800
 
 
@@ -91,16 +91,16 @@ def test_deny_edit_write_aggregation(tmp_path):
 
 def test_grep_glob_webfetch_counts_no_savings(tmp_path):
     _seed_events(tmp_path, [
-        {'ts': _now_iso(), 'event': 'deny_grep', 'pattern': 'foo'},
-        {'ts': _now_iso(), 'event': 'deny_glob', 'pattern': '*.py'},
-        {'ts': _now_iso(), 'event': 'deny_webfetch', 'url': 'https://x'},
+        {'ts': _now_iso(), 'event': 'deny_grep', 'pattern': 'foo', 'sid': 's1'},
+        {'ts': _now_iso(), 'event': 'deny_glob', 'pattern': '*.py', 'sid': 's1'},
+        {'ts': _now_iso(), 'event': 'deny_webfetch', 'url': 'https://x', 'sid': 's1'},
     ])
     rc, out, err = _run([], tmp_path)
-    assert 'Grep denies:          1' in out
-    assert 'Glob denies:          1' in out
-    assert 'WebFetch denies:      1' in out
-    assert 'no direct saving claimed' in out
-    assert 'savings not measurable' in out
+    assert 'Grep/Glob/WebFetch' in out
+    assert 'no saving claimed' in out
+    # Every deny is a correction, and corrections are the acceptance signal.
+    assert 'deny_grep' in out and 'deny_glob' in out and 'deny_webfetch' in out
+    assert 'FRICTION' in out
 
 
 def test_methodology_tags_present(tmp_path):
@@ -110,9 +110,10 @@ def test_methodology_tags_present(tmp_path):
          'cached': False, 'threshold': 8000},
     ])
     rc, out, err = _run([], tmp_path)
-    assert '[observed]' in out
-    assert '[counterfactual: st_size]' in out
-    assert '[counterfactual: read-tax st_size]' in out
+    assert 'AVOIDED (observed)' in out
+    assert 'PAID (observed)' in out
+    assert 'COUNTERFACTUAL (modelled, NOT included in the net above)' in out
+    assert '[st_size]' in out
 
 
 def test_downstream_avoidance_caveat_in_footer(tmp_path):
@@ -300,3 +301,49 @@ def test_retrieval_no_retry_when_unrelated(tmp_path):
     rc, out, err = _run(['--retrieval', '--days', '1'], tmp_path)
     assert rc == 0
     assert "0 retries" in out
+
+
+def _seed_retrievals(home: Path, rows):
+    log = home / '.claude' / 'cache' / 'ccm' / 'retrieval.log'
+    log.parent.mkdir(parents=True, exist_ok=True)
+    with open(log, 'w') as f:
+        for r in rows:
+            f.write(json.dumps(r) + '\n')
+
+
+def test_outline_report_separates_indexed_from_unindexed(tmp_path):
+    """The hypothesis test: does a stub index change retrieval behaviour?"""
+    ts = _now_iso()
+    _seed_events(tmp_path, [
+        {'ts': ts, 'event': 'cache_wrap', 'cmd_head': 'cat a', 'cached': True,
+         'cache_key': 'b2s:aaa', 'original_bytes': 50_000, 'stub_bytes': 300,
+         'outline_sections': 4, 'outline_bytes': 120, 'has_menu': False},
+        {'ts': ts, 'event': 'cache_wrap', 'cmd_head': 'cat b', 'cached': True,
+         'cache_key': 'b2s:bbb', 'original_bytes': 50_000, 'stub_bytes': 200,
+         'outline_sections': 0, 'outline_bytes': 40, 'has_menu': False},
+        {'ts': ts, 'event': 'cache_wrap', 'cmd_head': 'cat c.py', 'cached': True,
+         'cache_key': 'b2s:ccc', 'original_bytes': 50_000, 'stub_bytes': 260,
+         'outline_sections': 0, 'outline_bytes': 40, 'has_menu': True},
+    ])
+    _seed_retrievals(tmp_path, [
+        {'timestamp': ts, 'key': 'b2s:aaa', 'filter': {'lines': '10-20'},
+         'source_size': 50_000, 'returned_bytes': 5_000},
+        {'timestamp': ts, 'key': 'b2s:bbb', 'filter': {'grep': '.'},
+         'source_size': 50_000, 'returned_bytes': 50_000},
+    ])
+
+    rc, out, err = _run(['--outline'], tmp_path)
+    assert rc == 0, err
+    assert 'sections index' in out
+    assert 'profile only' in out
+    assert 'symbol menu' in out
+    # the indexed blob was sliced; the unindexed one was pulled whole
+    assert '0.10' in out and '1.00' in out
+    assert 'lines 100%' in out
+
+
+def test_outline_report_survives_empty_window(tmp_path):
+    _seed_events(tmp_path, [])
+    rc, out, err = _run(['--outline'], tmp_path)
+    assert rc == 0, err
+    assert 'no cached events in window' in out
