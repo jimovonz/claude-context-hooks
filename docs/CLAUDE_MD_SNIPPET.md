@@ -20,6 +20,7 @@ equivalent.
 | Read a local HTML file        | `cch-html.py FILE` or pipe to stdin (READ-ONLY view — never use before editing; edit HTML source raw via `cat` + `cch-edit.py`) |
 | Project rules by file pattern | drop `.cch/rules/*.md` with `globs:` frontmatter — the rule body auto-appends (once per session) to output of any command touching a matching file |
 | Run many commands at once     | pipe one-per-line to `cch-batch.py` (concurrent, one tool call — see below) |
+| Remote work over SSH          | `ssh-tool.py open NAME user@host [--password-file PATH] [-A] [-L/-R spec]` then `ssh-tool.py run NAME -- CMD` — persistent multiplexed session (no per-turn reconnect/reauth), still gets cch caching for free since it's a plain wrapped Bash command. `ssh-tool.py --help` for detach/tunnel/copy/list/reset. Plain `ssh`/`sshpass` remain fine for anything one-off. |
 
 **cch-html — when and when not.** It is a READ tool for page *content*.
 Use it when you want what a page *says* (articles, docs, listings, any

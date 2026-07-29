@@ -67,6 +67,7 @@ HOOK_FILES = [
     'cch-edit.py',
     'cch-write.py',
     'ccm-get.py',
+    'ssh-tool.py',
     'lib/__init__.py',
     'lib/ccm_cache.py',
     'lib/event_log.py',
@@ -86,6 +87,7 @@ BIN_FILES = [
     'cch-write.py',
     'ccm-get.py',
     'cch-gain.py',
+    'ssh-tool.py',
 ]
 
 # settings.json structure. PreToolUse:Bash is appended (not replacing
