@@ -145,7 +145,7 @@ def test_sed_wide_range_allowed_with_warn(run_hook):
     assert rc == 0
     _assert_allowed(out)
     cmd = out['hookSpecificOutput']['updatedInput']['command']
-    assert 'echo "[cch:' in cmd
+    assert "printf" in cmd and "[cch:" in cmd and "echo" not in cmd
 
 
 def test_sed_narrow_range_allowed(run_hook):
@@ -177,7 +177,7 @@ def test_sed_double_quotes_allowed_with_warn(run_hook):
     assert rc == 0
     _assert_allowed(out)
     cmd = out['hookSpecificOutput']['updatedInput']['command']
-    assert 'echo "[cch:' in cmd
+    assert "printf" in cmd and "[cch:" in cmd and "echo" not in cmd
 
 
 def test_sed_under_warn_threshold_no_warning(run_hook):
@@ -193,7 +193,7 @@ def test_sed_at_warn_threshold_warns(run_hook):
     assert rc == 0
     _assert_allowed(out)
     cmd = out['hookSpecificOutput']['updatedInput']['command']
-    assert 'echo "[cch:' in cmd
+    assert "printf" in cmd and "[cch:" in cmd and "echo" not in cmd
 
 
 # --- non-read commands pass through ---

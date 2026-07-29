@@ -18,7 +18,11 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
 
-from lib.event_log import log_event
+try:
+    from lib.event_log import log_event
+except Exception:                       # logging must never break a hook
+    def log_event(*_args, **_kwargs):
+        return None
 
 # Patterns indicating code-structure queries cairn-graph can answer.
 # Matched against the combined prompt+description text (case-insensitive).

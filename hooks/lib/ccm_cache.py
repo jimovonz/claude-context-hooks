@@ -15,6 +15,7 @@ import gzip
 import hashlib
 import json
 import os
+import time
 from datetime import datetime
 from pathlib import Path
 from typing import Optional, Literal, TypedDict
@@ -64,6 +65,15 @@ CCM_LAST_KEY_FILE: Optional[Path] = None
 # Compression threshold - don't compress small content
 COMPRESSION_THRESHOLD = 1024  # 1KB
 
+# Cache lifecycle. Nothing ever deleted blobs: delete_cached_content had zero
+# callers, there was no TTL and no size cap, so ~/.claude/cache/ccm grew
+# monotonically (24MB over 62k commands when this was added). Pruning is
+# opportunistic — at most once a day, triggered from init — and never touches
+# pinned entries.
+CACHE_TTL_DAYS = int(os.environ.get('CCH_CACHE_TTL_DAYS', '14'))
+CACHE_MAX_MB = int(os.environ.get('CCH_CACHE_MAX_MB', '256'))
+PRUNE_INTERVAL_S = 24 * 3600
+
 
 def init_ccm_cache(base_dir: Optional[Path] = None) -> None:
     """
@@ -88,6 +98,8 @@ def init_ccm_cache(base_dir: Optional[Path] = None) -> None:
             os.chmod(d, 0o700)
         except OSError:
             pass
+
+    _maybe_prune()
 
 
 def _ensure_initialized() -> None:
@@ -255,6 +267,26 @@ def store_content(
                     'pinned_at': now
                 }
             _save_metadata(key, meta)
+        else:
+            # Blob survived but its sidecar did not (pruned, or an interrupted
+            # write). Without this the key stays retrievable forever while
+            # --info reports nothing about it.
+            _save_metadata(key, {
+                'key': key,
+                'created_at': now,
+                'last_access_at': now,
+                'access_count': 0,
+                'bytes_uncompressed': len(content_bytes),
+                'lines': lines,
+                'compression': compression,
+                'source': source or {},
+                'pinned': {
+                    'level': pin_level,
+                    'reason': pin_reason if pin_level != 'none' else '',
+                    'pinned_at': now if pin_level != 'none' else ''
+                },
+                'rebuilt': True,
+            })
     else:
         # New content - compress and store
         compression = get_compression_method()
@@ -732,3 +764,100 @@ def delete_cached_content(key: str) -> bool:
             pass
 
     return deleted
+
+
+def _pinned_stem(stem: str) -> bool:
+    try:
+        meta = json.loads((CCM_META_DIR / f'{stem}.json').read_text())
+    except (OSError, ValueError):
+        return False
+    return (meta.get('pinned') or {}).get('level', 'none') != 'none'
+
+
+def prune_cache(ttl_days: Optional[int] = None,
+                max_mb: Optional[int] = None) -> dict:
+    """Delete unpinned cache entries: first by age, then oldest-first by size.
+
+    Before this the cache had no eviction of any kind — delete_cached_content
+    had zero callers — so blobs accumulated for the life of the machine.
+    Pinned entries are never removed.
+    """
+    _ensure_initialized()
+    ttl_days = CACHE_TTL_DAYS if ttl_days is None else ttl_days
+    max_mb = CACHE_MAX_MB if max_mb is None else max_mb
+    cutoff = time.time() - ttl_days * 86400
+
+    removed = 0
+    freed = 0
+    entries = []
+    try:
+        blobs = list(CCM_BLOBS_DIR.iterdir())
+    except OSError:
+        blobs = []
+    for blob in blobs:
+        try:
+            st = blob.stat()
+        except OSError:
+            continue
+        entries.append([blob, st.st_mtime, st.st_size])
+
+    def _drop(entry) -> bool:
+        nonlocal removed, freed
+        blob, _mtime, size = entry
+        try:
+            blob.unlink()
+        except OSError:
+            return False
+        try:
+            (CCM_META_DIR / f'{blob.stem}.json').unlink(missing_ok=True)
+        except OSError:
+            pass
+        removed += 1
+        freed += size
+        return True
+
+    survivors = []
+    for entry in entries:
+        if entry[1] < cutoff and not _pinned_stem(entry[0].stem):
+            if _drop(entry):
+                continue
+        survivors.append(entry)
+
+    limit = max_mb * 1024 * 1024
+    total = sum(e[2] for e in survivors)
+    if limit > 0 and total > limit:
+        survivors.sort(key=lambda e: e[1])      # oldest first
+        keep = []
+        for entry in survivors:
+            if total > limit and not _pinned_stem(entry[0].stem):
+                if _drop(entry):
+                    total -= entry[2]
+                    continue
+            keep.append(entry)
+        survivors = keep
+
+    return {
+        'removed': removed,
+        'freed_bytes': freed,
+        'remaining': len(survivors),
+        'remaining_bytes': sum(e[2] for e in survivors),
+        'ttl_days': ttl_days,
+        'max_mb': max_mb,
+    }
+
+
+def _maybe_prune() -> None:
+    """Run prune_cache at most once a day. Best-effort, never raises."""
+    if CCM_CACHE_DIR is None:
+        return
+    stamp = CCM_CACHE_DIR / 'last_prune'
+    try:
+        if stamp.exists() and (time.time() - stamp.stat().st_mtime) < PRUNE_INTERVAL_S:
+            return
+        stamp.touch()
+    except OSError:
+        return
+    try:
+        prune_cache()
+    except Exception:
+        pass

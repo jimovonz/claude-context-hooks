@@ -20,9 +20,12 @@ Usage:
 Exit 0 on success, 1 on any error.
 """
 
-import os
 import sys
 from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+from lib.atomic import atomic_write_bytes
 
 
 def main() -> int:
@@ -44,23 +47,13 @@ def main() -> int:
 
     content = sys.stdin.buffer.read()
 
-    tmp = target.with_name(target.name + '.cch-tmp')
     try:
-        existing_mode = target.stat().st_mode if target.exists() else None
-        tmp.write_bytes(content)
-        if existing_mode is not None:
-            os.chmod(tmp, existing_mode)
-        os.replace(tmp, target)
+        real = atomic_write_bytes(target, content)
     except OSError as e:
-        if tmp.exists():
-            try:
-                tmp.unlink()
-            except OSError:
-                pass
         print(f'cch-write: write failed: {e}', file=sys.stderr)
         return 1
 
-    print(f'cch-write: wrote {len(content)} bytes to {target}')
+    print(f'cch-write: wrote {len(content)} bytes to {real}')
     return 0
 
 
