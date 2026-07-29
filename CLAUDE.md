@@ -123,6 +123,13 @@ across turns. Transport is the filesystem; failure domains stay separate.
     round trips are. Volume belongs on the mechanisms that need NO extra
     turn: delta emission, passthrough, promoted symbol menus, and the graph
     answering symbol-greps at hook time.
+- **Threshold may be too high — reopen with visible-cost data.** Today's 8000
+  came from costing a retrieval round trip at ~500 tokens. Earlier measurement
+  of the actual JSONL round trip put it nearer 138–175 visible tokens, which
+  moves break-even to `(60 + 175) / (1 - 0.64)` ≈ 650 tokens ≈ **2.6 kB**, not
+  8 kB. The two differ on whether the model's own deliberation counts as part of
+  the turn cost. Resolve with `cch-gain --outline` once real traffic accumulates
+  rather than by re-deriving; the answer changes the threshold by 3x.
 - **CLAUDE.md instruction snippet wording.** Iterate against real use.
   The current snippet covers helpers (`cch-edit`, `cch-write`) and the
   unconditional block on Edit/Write/NotebookEdit; correction rate from

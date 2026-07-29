@@ -82,6 +82,23 @@ Reference implementation: `hooks/lib/supersede.py` (`may_elide`). The proxy
 may import it or reimplement from this document; the on-disk format is the
 contract, not the code.
 
+**Reachability, measured.** The predicate is sound and almost never true. Over
+62,747 wrapped commands, supersession fired **twice**; only 3.9% of attributed
+(session, command) signatures were re-run at all, for 88 extra runs in total.
+Sizing the wider opportunity did not rescue it either: the 1–8 kB band the
+proxy could otherwise elide holds real volume (23k tokens in a single
+150-command session, ~25k projected for 500 commands), but payback depends on
+the history *after* the elision point, not on how much is elided — 7.6 further
+requests when 10k tokens follow, 38 when 50k do, 76 for a small elision deep in
+a session. Low-`H` sites are recent and probably still in use; high-`H` sites
+are safe and unaffordable. The one free moment is compaction, and it belongs to
+Claude Code: the proxy sees only the compacted result, and cannot know which
+request is the last before it.
+
+So §4 and §5 are specified and implemented on CCH's side, and the proxy half is
+**deliberately not built**. Build it if traffic ever makes the predicate fire;
+do not build it on the strength of the design reading well.
+
 ## 5. Placement rules
 
 **Elide in place, once.** Replacing a full result with its stub changes the
