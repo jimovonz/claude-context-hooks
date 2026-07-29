@@ -77,6 +77,7 @@ your `~/.claude/CLAUDE.md` so the model knows how to route.
 | `hooks/lib/budget.py`        | Finite, flock-serialized full-content budget over a rolling window |
 | `hooks/lib/delta.py`         | Per-session emission dedup: unchanged output collapses, changed output diffs |
 | `hooks/lib/outline.py`       | Extractive stub outline: producer-delimited sections + line-length profile (counts and verbatim labels only, never paraphrase) |
+| `hooks/lib/supersede.py`     | Supersession index + `may_elide` — CCH's half of [docs/CONTRACT.md](docs/CONTRACT.md), the seam with the Cairn proxy |
 | `hooks/cch-gain.py`          | Token report: net accounting + friction ranking; `--dist` size histogram, `--retrieval` orphan/slice analysis, `--outline` stub-index effectiveness |
 | `hooks/cch-eval.py`          | Did compression keep the answer? Offline reachability suite — a planted canary must be recoverable using only what the stub advertises. No model, no network, no key |
 

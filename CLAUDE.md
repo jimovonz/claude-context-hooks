@@ -94,6 +94,14 @@ remove or replace it.
 4. Sanity-check README against the v2.1 shape (guards module, budget,
    delta, `--symbol` edits).
 
+## Interface with the Cairn proxy
+
+[`docs/CONTRACT.md`](docs/CONTRACT.md) — CCH and the proxy see different things
+by position: CCH sees raw tool output before Claude Code touches it, the proxy
+sees the assembled request and the cache breakpoints. Neither can see the
+other's view, so CCH produces recoverable stubs and the proxy manages them
+across turns. Transport is the filesystem; failure domains stay separate.
+
 ## Open questions
 
 - **Cache threshold — RESOLVED with data (2026-07): 8000.** Two analyses,

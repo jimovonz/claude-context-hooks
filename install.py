@@ -73,6 +73,7 @@ HOOK_FILES = [
     'lib/budget.py',
     'lib/delta.py',
     'lib/outline.py',
+    'lib/supersede.py',
     'cch-gain.py',
 ]
 

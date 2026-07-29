@@ -82,6 +82,13 @@ def emission_for(session: str, command: str, content: str,
     if not prev:
         return None
 
+    if prev != key:
+        try:
+            from lib.supersede import record as record_supersession
+            record_supersession(prev, key)
+        except Exception:
+            pass
+
     if prev == key:
         lines = content.count('\n')
         return (
