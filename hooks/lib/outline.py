@@ -63,14 +63,21 @@ def _sections(lines: List[str]) -> List[Tuple[int, str]]:
     return out
 
 
+def _line_char_offset(lines: List[str], index: int) -> int:
+    """1-indexed character offset where line  (0-based) starts."""
+    return sum(len(x) + 1 for x in lines[:index]) + 1
+
+
 def _profile(lines: List[str]) -> str:
     widths = [len(x) for x in lines] or [0]
     median = int(statistics.median(widths))
     longest = max(widths)
     text = f'lines: {len(lines)} · median {median} chars · max {longest}'
     if longest >= LONG_LINE_CHARS:
-        where = widths.index(longest) + 1
-        text += f' (L{where} is {longest:,} chars — slice it with --chars A-B)'
+        idx = widths.index(longest)
+        base = _line_char_offset(lines, idx)
+        text += (f' (L{idx + 1} is {longest:,} chars, starts at c{base}'
+                 f' — --grep windows it and reports offsets for --chars)')
     return text
 
 

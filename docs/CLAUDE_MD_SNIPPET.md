@@ -87,7 +87,8 @@ ccm-get.py <key> --grep PATTERN     # lines matching regex
 ccm-get.py <key> --head N            # first N lines
 ccm-get.py <key> --tail N            # last N lines
 ccm-get.py <key> --lines A-B         # line range
-ccm-get.py <key> --grep PATTERN -C 2 # with context
+ccm-get.py <key> --grep PATTERN -C 2 # with context (grep windows over-long
+                                     #   matched lines and reports c-offsets)
 ccm-get.py <key> --symbol NAME        # function body via graph.db
 ccm-get.py <key> --chars A-B         # character range (for very long lines)
 ```

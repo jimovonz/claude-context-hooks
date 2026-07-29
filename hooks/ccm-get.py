@@ -362,6 +362,27 @@ def _charge_full_retrieval(args, content: str) -> None:
           f"resets in {resets_h:.1f}h]", file=sys.stderr)
 
 
+GREP_LINE_CAP = 2000
+GREP_WINDOW = 300
+
+
+def _window_match(line: str, pattern) -> str:
+    """Trim an over-long matched line to a window around the match.
+
+    Returning an 18k-character line because it happened to contain the match
+    is never what the caller wanted, and it is what made grep useless on
+    JSONL and minified blobs. The char offset makes --chars actionable.
+    """
+    if len(line) <= GREP_LINE_CAP:
+        return line
+    m = pattern.search(line)
+    at = m.start() if m else 0
+    lo = max(0, at - GREP_WINDOW)
+    hi = min(len(line), at + GREP_WINDOW)
+    return (f'[c{lo + 1}-{hi} of {len(line)} chars] '
+            f'{"…" if lo else ""}{line[lo:hi]}{"…" if hi < len(line) else ""}')
+
+
 def _slice_chars(content: str, spec: str) -> str:
     """Character-range slice of the raw content (1-indexed, inclusive)."""
     try:
@@ -459,6 +480,7 @@ def _apply_filters(lines: list, args) -> tuple[list, bool]:
             lines = result_lines
         else:
             lines = [line for line in lines if pattern.search(line)]
+        lines = [_window_match(line, pattern) for line in lines]
         filtered = True
 
     if args.head:

@@ -347,7 +347,7 @@ def main() -> int:
     retrieve_hint = (
         f'Retrieve: ccm-get.py {key} '
         + ('[--symbol NAME] ' if menu_line else '')
-        + '[--grep PATTERN] [--head N] [--tail N] [--lines A-B] [--chars A-B]'
+        + '[--grep PATTERN [-C N]] [--head N] [--tail N] [--lines A-B] [--chars A-B]'
     )
     # Promote cairn-graph footer + symbol menu above the stub so both are
     # visible without a retrieval round-trip.

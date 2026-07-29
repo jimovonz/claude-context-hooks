@@ -1,6 +1,7 @@
 """Tests for the extractive outline and ccm-get --chars."""
 import json
 import os
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -202,3 +203,20 @@ def test_budget_denial_is_logged(tmp_path, monkeypatch):
     assert 'budget_spend' in kinds and 'budget_denied' in kinds
     denied = [r for r in rows if r['event'] == 'budget_denied'][0]
     assert denied['wanted'] == 80 and denied['remaining'] == 20
+
+
+def test_grep_windows_an_overlong_matched_line(tmp_path):
+    """Returning an 18k line because it contained the match is never wanted."""
+    key = _seed(tmp_path, 'short\n' + 'A' * 9000 + 'NEEDLE' + 'B' * 9000 + '\nshort\n')
+    rc, out, _err = _run(CCM_GET, key, '--grep', 'NEEDLE', env={'HOME': str(tmp_path)})
+    assert rc == 0
+    assert 'NEEDLE' in out
+    assert len(out) < 1500, 'match window should not return the whole line'
+    assert re.search(r'\[c\d+-\d+ of \d+ chars\]', out), 'offsets must be reported'
+
+
+def test_grep_leaves_normal_lines_intact(tmp_path):
+    key = _seed(tmp_path, 'alpha\nbeta NEEDLE gamma\ndelta\n' + 'pad\n' * 900)
+    rc, out, _err = _run(CCM_GET, key, '--grep', 'NEEDLE', env={'HOME': str(tmp_path)})
+    assert rc == 0
+    assert out.strip() == 'beta NEEDLE gamma'

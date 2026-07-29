@@ -78,6 +78,7 @@ your `~/.claude/CLAUDE.md` so the model knows how to route.
 | `hooks/lib/delta.py`         | Per-session emission dedup: unchanged output collapses, changed output diffs |
 | `hooks/lib/outline.py`       | Extractive stub outline: producer-delimited sections + line-length profile (counts and verbatim labels only, never paraphrase) |
 | `hooks/cch-gain.py`          | Token report: net accounting + friction ranking; `--dist` size histogram, `--retrieval` orphan/slice analysis, `--outline` stub-index effectiveness |
+| `hooks/cch-eval.py`          | Did compression keep the answer? Offline reachability suite (needle must be recoverable from what the stub advertises) + optional model A/B via `--accuracy` |
 
 ## Environment variables
 
