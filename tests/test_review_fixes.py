@@ -505,3 +505,61 @@ def test_bash_hook_survives_every_single_lib_removal(tmp_path):
         assert rc == 0, f'removing lib/{src.name} broke the Bash hook: {err[:200]}'
         assert out.strip().startswith('{'), (
             f'removing lib/{src.name} produced no hook response: {out[:120]!r}')
+
+
+# ------------------------------------------------------------ graph TESTED_BY
+
+def _graph_with_tested_by(root, edges, nodes=()):
+    import sqlite3
+    d = root / '.code-review-graph'
+    d.mkdir(parents=True, exist_ok=True)
+    conn = sqlite3.connect(str(d / 'graph.db'))
+    conn.execute('CREATE TABLE nodes (kind TEXT, name TEXT, qualified_name TEXT, '
+                 'file_path TEXT, line_start INT, line_end INT, language TEXT, '
+                 'updated_at REAL)')
+    conn.execute('CREATE TABLE edges (kind TEXT, source_qualified TEXT, '
+                 'target_qualified TEXT, file_path TEXT, updated_at REAL)')
+    for n in nodes:
+        conn.execute('INSERT INTO nodes VALUES (?,?,?,?,?,?,?,0.0)', n)
+    for src, tgt in edges:
+        conn.execute("INSERT INTO edges VALUES ('TESTED_BY',?,?,'',0.0)", (src, tgt))
+    conn.commit(); conn.close()
+    return d / 'graph.db'
+
+
+def test_tested_by_is_read_in_the_direction_it_is_written(tmp_path):
+    """TESTED_BY is (source=symbol, target=test) — querying target found nothing.
+
+    Every --tests lookup in the repo returned empty because the query looked
+    in the wrong column.
+    """
+    from lib import guards
+    db = _graph_with_tested_by(tmp_path, [
+        ('generate_outline', f'{tmp_path}/tests/test_outline.py::test_sections'),
+        ('generate_outline', f'{tmp_path}/tests/test_outline.py::test_profile'),
+    ])
+    answer = guards.graph_answer(db, 'tests', 'generate_outline')
+    assert answer and 'test_sections' in answer and 'test_profile' in answer
+
+
+def test_tested_by_matches_bare_source_names(tmp_path):
+    """75% of TESTED_BY rows carry a bare name while nodes are path-qualified."""
+    import sqlite3
+    src = tmp_path / 'mod.py'
+    src.write_text('def target(a):\n    return a\n')
+    qname = f'{src}::target'
+    _graph_with_tested_by(
+        tmp_path,
+        edges=[('target', f'{tmp_path}/tests/test_mod.py::test_target')],
+        nodes=[
+            ('Function', 'target', qname, str(src), 1, 2, 'python'),
+            ('Test', 'test_target', f'{tmp_path}/tests/test_mod.py::test_target',
+             f'{tmp_path}/tests/test_mod.py', 1, 3, 'python'),
+        ],
+    )
+    body = tmp_path / 'body.py'
+    body.write_text('def target(a):\n    return a + 1\n')
+    rc, out, err = _run(CCH_EDIT, src, '--symbol', 'target', '--new-file', body)
+    assert rc == 0, err
+    assert 'tests:1' in out, f'bare-name TESTED_BY not matched: {out!r}'
+    assert 'test_target' in out

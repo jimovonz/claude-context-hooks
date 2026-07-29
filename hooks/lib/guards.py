@@ -267,9 +267,13 @@ def graph_answer(graph_db: Path, redirect_type: str, symbol: str) -> Optional[st
         elif redirect_type in ("callers", "tests", "callees"):
             edge_kind = {"callers": "CALLS", "tests": "TESTED_BY",
                          "callees": "CALLS"}[redirect_type]
-            col, other = (("target_qualified", "source_qualified")
-                          if redirect_type != "callees"
-                          else ("source_qualified", "target_qualified"))
+            # TESTED_BY is stored as (source=tested symbol, target=test), the
+            # same direction as CALLS for callees — so the symbol is looked
+            # up in source_qualified, not target. Searching target here
+            # returned nothing for every symbol in the repo.
+            col, other = (("source_qualified", "target_qualified")
+                          if redirect_type in ("callees", "tests")
+                          else ("target_qualified", "source_qualified"))
             rows = conn.execute(
                 f"SELECT DISTINCT {other} FROM edges "
                 f"WHERE kind = ? AND ({col} LIKE ? OR {col} = ? "

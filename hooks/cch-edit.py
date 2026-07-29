@@ -107,9 +107,14 @@ def _print_impact(file_path: Path, old_string: str, content: str) -> None:
                 # Extract file from qualified name (module.path.func -> module/path)
                 caller_files.add(sq.rsplit(".", 1)[0] if "." in sq else sq)
 
+            # 75% of TESTED_BY edges carry a BARE symbol on the source side
+            # while nodes.qualified_name is path::name, so joining on the
+            # qualified form alone matched nothing — every impact line
+            # reported tests:0 regardless of coverage.
             cur.execute(
-                "SELECT target_qualified FROM edges WHERE source_qualified = ? AND kind = 'TESTED_BY'",
-                (qname,),
+                "SELECT target_qualified FROM edges "
+                "WHERE source_qualified IN (?, ?) AND kind = 'TESTED_BY'",
+                (qname, qname.rsplit("::", 1)[-1]),
             )
             for (tgt,) in cur.fetchall():
                 total_tests += 1
