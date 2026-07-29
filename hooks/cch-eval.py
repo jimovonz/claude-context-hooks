@@ -16,15 +16,19 @@ Two layers:
       information the compression layer destroyed in practice even though the
       bytes are still on disk. Requires no API key and belongs in CI.
 
-  accuracy (--accuracy, needs an API key)
-      Ask a model the question under two arms — full content, versus stub —
-      and compare the answers. This is the arm that matches what other
-      compression layers report. Raw HTTP over urllib, no SDK: the project
-      is stdlib-only and an eval harness is a poor reason to change that.
+There was a second arm — a model A/B, full content versus stub — and it was
+removed rather than fixed. It could not have worked: the canary is absent
+from the stub by construction, and the call carried no retrieval tool, so
+the stub arm returned False by definition. It would have spent API calls to
+restate "compression compressed", which reachability already proves offline.
+
+A real accuracy arm needs two things this did not have: a task with a
+graded answer rather than a token lookup, and the retrieval loop actually
+wired up as a tool. Until then the honest measurements are reachability
+below and `cch-gain --outline` over real traffic — neither needs a model.
 
 Usage:
   cch-eval.py                 # reachability suite
-  cch-eval.py --accuracy      # add the model A/B
   cch-eval.py --json
 """
 import argparse
@@ -175,106 +179,19 @@ def render(results) -> str:
     return '\n'.join(out)
 
 
-def _credentials():
-    """(headers, source) for the Messages API, or (None, reason).
-
-    No SDK: the whole project is stdlib-only apart from an optional
-    zstandard, and an eval harness is a poor reason to make `anthropic` the
-    first hard dependency. Raw HTTP to /v1/messages is a dozen lines.
-    """
-    key = os.environ.get('ANTHROPIC_API_KEY')
-    if key:
-        return {'x-api-key': key}, 'ANTHROPIC_API_KEY'
-
-    token = os.environ.get('ANTHROPIC_AUTH_TOKEN')
-    if token:
-        return ({'Authorization': f'Bearer {token}',
-                 'anthropic-beta': 'oauth-2025-04-20'}, 'ANTHROPIC_AUTH_TOKEN')
-
-    claude_creds = Path.home() / '.claude' / '.credentials.json'
-    if claude_creds.exists():
-        return None, (f'no ANTHROPIC_API_KEY / ANTHROPIC_AUTH_TOKEN set. '
-                      f'{claude_creds} exists but belongs to Claude Code — '
-                      f'export a key of your own rather than borrowing it')
-    return None, 'no ANTHROPIC_API_KEY / ANTHROPIC_AUTH_TOKEN set'
-
-
-def _ask(headers, model: str, prompt: str, max_tokens: int = 64):
-    """One Messages API call. Returns (text, input_tokens)."""
-    import urllib.error
-    import urllib.request
-
-    body = json.dumps({'model': model, 'max_tokens': max_tokens,
-                       'messages': [{'role': 'user', 'content': prompt}]}).encode()
-    req = urllib.request.Request(
-        'https://api.anthropic.com/v1/messages', data=body,
-        headers={'content-type': 'application/json',
-                 'anthropic-version': '2023-06-01', **headers})
-    with urllib.request.urlopen(req, timeout=120) as resp:
-        payload = json.loads(resp.read().decode('utf-8'))
-    text = ''.join(b.get('text', '') for b in payload.get('content', [])
-                   if b.get('type') == 'text')
-    return text, (payload.get('usage') or {}).get('input_tokens')
-
-
-def run_accuracy():
-    """Model A/B: full content vs stub. Returns (results, skip_reason)."""
-    headers, source = _credentials()
-    if headers is None:
-        return None, source
-
-    model = os.environ.get('CCH_EVAL_MODEL', 'claude-haiku-4-5')
-    question = ('The text above contains a canary token beginning "ZX9". '
-                'Reply with that token and nothing else.')
-    results = []
-    for name, content, _term in _fixtures():
-        with tempfile.TemporaryDirectory() as d:
-            home = Path(d)
-            stub, _key = _stub(content, home, name)
-            row = {'fixture': name, 'credential': source, 'model': model}
-            for arm, payload in (('full', content), ('stub', stub)):
-                try:
-                    text, tokens = _ask(headers, model, f'{payload}\n\n{question}')
-                    row[arm] = NEEDLE in text
-                    row[f'{arm}_in'] = tokens
-                except Exception as exc:
-                    row[arm] = None
-                    row[f'{arm}_error'] = str(exc)[:160]
-            results.append(row)
-    return results, None
-
-
 def main() -> int:
     p = argparse.ArgumentParser(prog='cch-eval', description=__doc__,
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
-    p.add_argument('--accuracy', action='store_true',
-                   help='also run the model A/B (needs an API key)')
     p.add_argument('--json', action='store_true', help='machine-readable output')
     args = p.parse_args()
 
     reach = run_reachability()
     payload = {'reachability': reach}
 
-    if args.accuracy:
-        acc, skip = run_accuracy()
-        payload['accuracy'] = acc
-        payload['accuracy_skipped'] = skip
-
     if args.json:
         print(json.dumps(payload, indent=2))
     else:
         print(render(reach))
-        if args.accuracy:
-            print()
-            if payload.get('accuracy_skipped'):
-                print(f'Accuracy arm skipped: {payload["accuracy_skipped"]}')
-            else:
-                print('Accuracy — answer recovered under each arm')
-                print('=' * 66)
-                for r in payload['accuracy'] or []:
-                    print(f'  {r["fixture"]:<20} full={r.get("full")}  '
-                          f'stub={r.get("stub")}  '
-                          f'tokens {r.get("full_in")} -> {r.get("stub_in")}')
 
     failed = [r for r in reach if not r['reachable']]
     return 1 if failed else 0
