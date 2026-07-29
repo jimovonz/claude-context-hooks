@@ -16,6 +16,12 @@ inner command), large-output caching to its own CCM key, and the stub
 check digit. Large outputs become per-command [CCM_CACHED] stubs you can
 ccm-get individually; small outputs appear inline.
 
+Guards: every line runs through lib/guards.py first — the same bulk-read
+block, graph answer and rg -r warning the PreToolUse hook applies. Until
+that was wired up, batching was a complete bypass of the guard layer
+(cch-batch.py is in PASSTHROUGH_MARKERS, so the hook skips the whole
+batch), which made the documented power-tool also the documented hole.
+
 Usage:
   # one command per line on stdin
   cch-batch.py << 'EOF'
@@ -35,13 +41,17 @@ point is that nothing it runs can cancel anything).
 
 Same-file guard: multiple cch-edit.py / cch-write.py commands that target
 the SAME file are automatically run sequentially in input order (commands
-touching different files still run in parallel). Concurrent writers to one
-path previously raced on the shared .cch-tmp staging file and could
-lost-update each other (cairn: corrupted booking-widget.tsx). Batch freely;
-the guard makes the natural batching behavior safe instead of policing it.
+touching different files still run in parallel). Paths are compared after
+symlink resolution and after honouring a `cd X && ...` prefix, so two
+spellings of one file still serialize. Concurrent writers to one path
+previously raced on a shared staging file; that class of corruption is
+also gone at the source (lib/atomic.py stages through a unique temp
+file), so this guard now only orders writes rather than preventing
+corruption.
 """
 import argparse
 import os
+import re
 import shlex
 import subprocess
 import sys
@@ -50,7 +60,15 @@ from pathlib import Path
 
 # Resolve through any symlink (cch-batch is also symlinked into
 # ~/.local/bin) to find cache-wrap.py in the real hooks dir.
-CACHE_WRAP = Path(__file__).resolve().parent / 'cache-wrap.py'
+HOOKS_DIR = Path(__file__).resolve().parent
+CACHE_WRAP = HOOKS_DIR / 'cache-wrap.py'
+
+sys.path.insert(0, str(HOOKS_DIR))
+
+from lib import guards  # noqa: E402
+from lib.event_log import log_event  # noqa: E402
+
+_CD_PREFIX_RE = re.compile(r'^\s*cd\s+([^\s;&|]+)\s*&&\s*(.*)$')
 
 
 def _run_one(cmd: str) -> tuple[str, int]:
@@ -72,6 +90,56 @@ def _run_one(cmd: str) -> tuple[str, int]:
         return f'[cch-batch: failed to run command: {e}]\n', 1
 
 
+def _run_plain(cmd: str, mark_exit: bool = True) -> tuple[str, int]:
+    """Run a command directly via bash, bypassing cache-wrap."""
+    try:
+        p = subprocess.run(['bash', '-c', cmd], stdout=subprocess.PIPE,
+                           stderr=None, check=False)
+        out = p.stdout.decode('utf-8', 'replace')
+        if mark_exit:
+            if p.returncode != 0:
+                out += f'\n[exit {p.returncode}]\n'
+            return out, 0
+        return out, p.returncode
+    except Exception as e:
+        return f'[cch-batch: failed: {e}]\n', 1
+
+
+def target_file(cmd: str) -> str | None:
+    """Real absolute path a cch-edit/cch-write line writes to, or None.
+
+    Honours a `cd X && ...` prefix and resolves symlinks, so two spellings
+    of the same file are recognised as the same serialization key.
+    """
+    base = os.getcwd()
+    m = _CD_PREFIX_RE.match(cmd)
+    if m:
+        base = os.path.abspath(os.path.expanduser(m.group(1)))
+        cmd = m.group(2)
+    try:
+        toks = shlex.split(cmd)
+    except ValueError:
+        return None
+    for i, t in enumerate(toks):
+        if os.path.basename(t) not in ('cch-edit.py', 'cch-write.py'):
+            continue
+        j = i + 1
+        while j < len(toks):
+            tok = toks[j]
+            if tok in ('--old-file', '--new-file'):
+                j += 2  # flag consumes a value
+                continue
+            if tok.startswith('-'):
+                j += 1
+                continue
+            if tok in ('<<', '<', '<<<'):
+                return None  # redirection reached before a path
+            p = tok if os.path.isabs(tok) else os.path.join(base, tok)
+            return os.path.realpath(p)
+        return None
+    return None
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(
         description='Run many Bash commands concurrently in one tool call.',
@@ -82,6 +150,9 @@ def main() -> int:
     parser.add_argument('--no-cache-wrap', action='store_true',
                         help='Run commands via bash -c directly, bypassing '
                              'cache-wrap (no per-command caching/fail-soft)')
+    parser.add_argument('--no-guards', action='store_true',
+                        help='Skip the shared command guards (escape hatch; '
+                             'the guards are one-shot overridable anyway)')
     args = parser.parse_args()
 
     # Parse commands: one per line, skip blanks and #-comments.
@@ -96,55 +167,34 @@ def main() -> int:
         sys.stderr.write('cch-batch: no commands on stdin\n')
         return 0
 
+    sid = os.environ.get('CCH_SESSION_ID', '')
+    cwd = os.getcwd()
+
     def runner(cmd: str) -> tuple[str, int]:
         # Retrieval/wrapper invocations must never be re-wrapped: caching a
         # ccm-get retrieval re-stubs content the caller just paid to retrieve
-        # (recursive stubbing). Mirrors intercept-bash PASSTHROUGH_MARKERS.
-        if any(m in cmd for m in ('ccm-get.py', 'cache-wrap.py')):
-            try:
-                p = subprocess.run(['bash', '-c', cmd], stdout=subprocess.PIPE,
-                                   stderr=None, check=False)
-                out = p.stdout.decode('utf-8', 'replace')
-                if p.returncode != 0:
-                    out += f'\n[exit {p.returncode}]\n'
-                return out, 0
-            except Exception as e:
-                return f'[cch-batch: failed: {e}]\n', 1
+        # (recursive stubbing). Matched on the command WORD, not a substring.
+        if guards.is_passthrough(cmd):
+            return _run_plain(cmd)
+
+        if not args.no_guards:
+            reason = guards.block(cmd, cwd)
+            if reason:
+                log_event('deny_bash_guard', sid=sid, cmd_head=cmd[:120],
+                          batched=True,
+                          kind='graph' if 'graph:' in reason else 'bulk_read')
+                return reason + '\n', 0
+            cmd, applied = guards.apply_warnings(cmd)
+            for w in applied:
+                log_event('warn_rg_replace' if 'rg -r' in w else 'warn_bulk_sed',
+                          sid=sid, cmd_head=cmd[:120], batched=True)
+
         if args.no_cache_wrap:
-            try:
-                p = subprocess.run(['bash', '-c', cmd], stdout=subprocess.PIPE,
-                                   stderr=None, check=False)
-                return p.stdout.decode('utf-8', 'replace'), p.returncode
-            except Exception as e:
-                return f'[cch-batch: failed: {e}]\n', 1
+            return _run_plain(cmd, mark_exit=False)
         return _run_one(cmd)
 
     # Same-file guard: cch-edit/cch-write commands hitting one path are
     # chained in input order; everything else stays fully parallel.
-    def target_file(cmd: str) -> str | None:
-        try:
-            toks = shlex.split(cmd)
-        except ValueError:
-            return None
-        for i, t in enumerate(toks):
-            base = os.path.basename(t)
-            if base not in ('cch-edit.py', 'cch-write.py'):
-                continue
-            j = i + 1
-            while j < len(toks):
-                tok = toks[j]
-                if tok in ('--old-file', '--new-file'):
-                    j += 2  # flag consumes a value
-                    continue
-                if tok.startswith('-'):
-                    j += 1
-                    continue
-                if tok in ('<<', '<', '<<<'):
-                    return None  # redirection reached before a path
-                return os.path.abspath(tok)
-            return None
-        return None
-
     keys = [target_file(c) for c in commands]
     chains: list[list[int]] = []          # units of work, each run in order
     chain_of_key: dict[str, list[int]] = {}
@@ -167,6 +217,9 @@ def main() -> int:
         for unit, unit_results in zip(chains, pool.map(run_chain, chains)):
             for i, res in zip(unit, unit_results):
                 results[i] = res
+
+    log_event('batch', sid=sid, commands=len(commands), chains=len(chains),
+              serialized=len(serialized), jobs=jobs)
 
     n = len(commands)
     out = sys.stdout

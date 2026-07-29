@@ -26,9 +26,10 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
 
+from lib import budget
 from lib.ccm_cache import (
     init_ccm_cache, retrieve_content, get_metadata, get_last_key,
-    list_all_keys, get_cache_stats, verify_ccm_stub
+    list_all_keys, get_cache_stats, verify_ccm_stub, prune_cache
 )
 
 # Retrieval log for effectiveness analysis. Stable location regardless
@@ -46,7 +47,12 @@ def log_retrieval(key: str, args, returned_bytes: int = None) -> None:
         source_size = meta.get('bytes_uncompressed') if meta else None
         entry = {
             'timestamp': datetime.now().isoformat(),
-            'key': key[:20] + '...',
+            # Full key, not key[:20] + '...': the truncation made an exact
+            # join against events.jsonl impossible, so every consumer had to
+            # prefix-match and a naive analysis silently reported zero
+            # retrievals for every cache.
+            'key': key,
+            'sid': os.environ.get('CCH_SESSION_ID', '')[:36],
             'filter': {
                 'grep': args.grep,
                 'head': args.head,
@@ -118,7 +124,7 @@ def _resolve_symbol_lines(symbol: str):
     return (line_start, line_end)
 
 
-def main():
+def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description='Retrieve content from CCM cache with REQUIRED filtering',
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -126,38 +132,42 @@ def main():
 At least one filter is REQUIRED. This forces intentional retrieval.
 
 Examples:
-    ccm-get.py sha256:abc123 --grep error     # Lines containing 'error'
-    ccm-get.py sha256:abc123 --grep "error|warn" -C 2  # With context
-    ccm-get.py sha256:abc123 --head 50        # First 50 lines
-    ccm-get.py sha256:abc123 --tail 20        # Last 20 lines
-    ccm-get.py sha256:abc123 --lines 100-200  # Lines 100-200
-    ccm-get.py sha256:abc123 --grep "." --reason "need full file to edit"  # All content
+    ccm-get.py b2s:abc123 --grep error         # Lines containing 'error'
+    ccm-get.py b2s:abc123 --grep "error|warn" -C 2   # With context
+    ccm-get.py b2s:abc123 --head 50            # First 50 lines
+    ccm-get.py b2s:abc123 --tail 20            # Last 20 lines
+    ccm-get.py b2s:abc123 --lines 100-200      # Lines 100-200
+    ccm-get.py b2s:abc123 --symbol handle_req  # One function body
+    ccm-get.py b2s:abc123 --grep "." --reason "need full file to edit"
 
-Full retrieval (--grep ".") requires --reason explaining why filtering isn't possible.
+Full retrieval (--grep ".") spends from the shared full-content budget —
+the same finite pool cache-wrap draws on for uncached passthrough. When it
+is exhausted, narrow the filter or wait for the window to roll.
 """
     )
-    parser.add_argument('key', nargs='?', help='Cache key (sha256:...)')
+    parser.add_argument('key', nargs='?', help='Cache key (b2s:... or sha256:...)')
 
-    # Filtering options - at least one required
     filter_group = parser.add_argument_group('filtering (at least one required)')
     filter_group.add_argument('--grep', '-g', metavar='PATTERN',
-                        help='Filter lines matching regex pattern (use "." for all, requires --reason)')
+                              help='Filter lines matching regex pattern (use "." for all, spends budget)')
     filter_group.add_argument('--head', type=int, metavar='N',
-                        help='Show first N lines')
+                              help='Show first N lines')
     filter_group.add_argument('--tail', type=int, metavar='N',
-                        help='Show last N lines')
+                              help='Show last N lines')
     filter_group.add_argument('--lines', metavar='START-END',
-                        help='Show line range (1-indexed, e.g., 100-200)')
+                              help='Show line range (1-indexed, e.g., 100-200)')
     filter_group.add_argument('--symbol', metavar='NAME',
-                        help='Extract function/class body via graph.db lookup')
+                              help='Extract function/class body via graph.db lookup')
+    filter_group.add_argument('--chars', metavar='START-END',
+                              help='Character range (1-indexed) — for blobs whose lines are '
+                                   'too long to slice by line number')
     filter_group.add_argument('-C', '--context', type=int, default=0, metavar='N',
-                        help='Show N lines of context around grep matches')
+                              help='Show N lines of context around grep matches')
     filter_group.add_argument('-i', '--ignore-case', action='store_true',
-                        help='Case-insensitive grep')
+                              help='Case-insensitive grep')
     filter_group.add_argument('--reason', metavar='TEXT',
-                        help='Required with --grep "." - explain why full content needed (min 20 chars)')
+                              help='Required with --grep "." — why filtering will not do (min 20 chars)')
 
-    # Info/listing options
     parser.add_argument('--info', action='store_true',
                         help='Show metadata instead of content')
     parser.add_argument('--last', '-l', action='store_true',
@@ -166,200 +176,263 @@ Full retrieval (--grep ".") requires --reason explaining why filtering isn't pos
                         help='List recent cache entries')
     parser.add_argument('--stats', '-s', action='store_true',
                         help='Show cache statistics')
+    parser.add_argument('--budget', action='store_true',
+                        help='Show the remaining full-content budget')
+    parser.add_argument('--prune', action='store_true',
+                        help='Evict unpinned cache entries past the TTL / size cap')
+    parser.add_argument('--ttl-days', type=int, default=None,
+                        help='Override TTL for --prune')
+    parser.add_argument('--max-mb', type=int, default=None,
+                        help='Override size cap for --prune')
     parser.add_argument('--check', action='store_true',
                         help='Verify a pasted [CCM_CACHED] block is intact (transit-integrity check)')
     parser.add_argument('--limit', '-n', type=int, default=20,
                         help='Limit for --list (default: 20)')
+    return parser
 
-    args = parser.parse_args()
 
-    init_ccm_cache()
+def _cmd_check() -> int:
+    # Read a pasted [CCM_CACHED] block from stdin and verify its check digit.
+    # Lets a suspect (possibly garbled-in-transit) stub be tested before
+    # trusting the key it carries.
+    verdict = verify_ccm_stub(sys.stdin.read())
+    if verdict is True:
+        print("OK: stub intact (check digit matches)")
+        return 0
+    if verdict is False:
+        print("CORRUPT: check digit mismatch — stub was garbled in transit; "
+              "do not trust the key, re-run the original command", file=sys.stderr)
+        return 1
+    print("UNVERIFIABLE: no check digit found (legacy stub or not a "
+          "[CCM_CACHED] block)", file=sys.stderr)
+    return 1
 
-    if args.check:
-        # Read a pasted [CCM_CACHED] block from stdin and verify its check
-        # digit. Lets a suspect (possibly garbled-in-transit) stub be tested
-        # before trusting the key it carries.
-        block = sys.stdin.read()
-        verdict = verify_ccm_stub(block)
-        if verdict is True:
-            print("OK: stub intact (check digit matches)")
-        elif verdict is False:
-            print("CORRUPT: check digit mismatch — stub was garbled in transit; "
-                  "do not trust the key, re-run the original command", file=sys.stderr)
-            sys.exit(1)
-        else:
-            print("UNVERIFIABLE: no check digit found (legacy stub or not a "
-                  "[CCM_CACHED] block)", file=sys.stderr)
-            sys.exit(1)
-        return
 
-    if args.stats:
-        stats = get_cache_stats()
-        print(f"Cache directory: {stats.get('cache_dir', 'unknown')}")
-        print(f"Total entries: {stats.get('total_entries', 0)}")
-        print(f"Total size: {stats.get('total_size_bytes', 0):,} bytes")
-        print(f"Pinned entries: {stats.get('pinned_count', 0)}")
-        return
+def _cmd_stats() -> int:
+    stats = get_cache_stats()
+    print(f"Cache directory: {stats.get('cache_dir', 'unknown')}")
+    print(f"Total entries: {stats.get('total_entries', 0)}")
+    print(f"Total size: {stats.get('total_size_bytes', 0):,} bytes")
+    print(f"Pinned entries: {stats.get('pinned_count', 0)}")
+    spent, total, resets_h = budget.status()
+    if total:
+        print(f"Full-content budget: {(total - spent) / 1000:.1f}k of "
+              f"{total / 1000:.0f}k tokens left, resets in {resets_h:.1f}h")
+    return 0
 
-    if args.list:
-        keys = list_all_keys()
-        if not keys:
-            print("Cache is empty", file=sys.stderr)
-            return
 
-        print(f"Recent cache entries (showing {min(len(keys), args.limit)} of {len(keys)}):\n")
-        for key in keys[:args.limit]:
-            meta = get_metadata(key)
-            if meta:
-                pin_status = f" [pinned:{meta.get('pinned', {}).get('level', 'none')}]" if meta.get('pinned', {}).get('level', 'none') != 'none' else ""
-                source = meta.get('source', {})
-                tool = source.get('tool_name', 'unknown')
-                size = meta.get('bytes_uncompressed', 0)
-                print(f"  {key[:20]}...  {size:>8,} bytes  {tool}{pin_status}")
-            else:
-                print(f"  {key}")
-        return
+def _cmd_budget() -> int:
+    spent, total, resets_h = budget.status()
+    if not total:
+        print("Full-content budget: disabled (CCH_PASSTHROUGH_BUDGET=0)")
+        return 0
+    print(f"Full-content budget: {(total - spent) / 1000:.1f}k of "
+          f"{total / 1000:.0f}k tokens left ({spent / 1000:.1f}k spent), "
+          f"window resets in {resets_h:.1f}h")
+    return 0
 
-    # Resolve key
-    key = args.key
 
-    # Handle if user passed a path instead of just the key
-    # e.g., ~/.claude/cache/b2s:abc123 -> b2s:abc123
-    # or /home/user/.claude/cache/ccm/blobs/abc123.gz -> b2s:abc123
-    if key and '/' in key:
-        import os
-        basename = os.path.basename(key)
-        # Strip extension if it looks like a blob file
-        if basename.endswith(('.gz', '.zst', '.txt')):
-            basename = os.path.splitext(basename)[0]
-        # If basename looks like a key (hex or prefixed), use it
-        if basename.startswith(('b2s:', 'sha256:')) or all(c in '0123456789abcdef' for c in basename):
-            if not basename.startswith(('b2s:', 'sha256:')):
-                basename = f'b2s:{basename}'  # Assume b2s for raw hex
-            key = basename
+def _cmd_prune(args) -> int:
+    result = prune_cache(ttl_days=args.ttl_days, max_mb=args.max_mb)
+    print(f"Pruned {result['removed']} entries "
+          f"({result['freed_bytes'] / 1024 / 1024:.1f} MB freed); "
+          f"{result['remaining']} remain "
+          f"({result['remaining_bytes'] / 1024 / 1024:.1f} MB). "
+          f"TTL {result['ttl_days']}d, cap {result['max_mb']} MB.")
+    return 0
 
-    if args.last:
-        key = get_last_key()
-        if not key:
-            print("No cached items found", file=sys.stderr)
-            sys.exit(1)
-        if not args.key:
-            pass  # Use last key
-        else:
-            print(f"Note: Using --last key: {key}", file=sys.stderr)
 
-    if not key:
-        parser.print_help()
-        sys.exit(1)
-
-    if args.info:
+def _cmd_list(args) -> int:
+    keys = list_all_keys()
+    if not keys:
+        print("Cache is empty", file=sys.stderr)
+        return 0
+    print(f"Recent cache entries (showing {min(len(keys), args.limit)} of {len(keys)}):\n")
+    for key in keys[:args.limit]:
         meta = get_metadata(key)
         if not meta:
-            print(f"Key not found: {key}", file=sys.stderr)
-            sys.exit(1)
-
-        print(f"Key: {meta.get('key', key)}")
-        print(f"Created: {meta.get('created_at', 'unknown')}")
-        print(f"Last access: {meta.get('last_access_at', 'unknown')}")
-        print(f"Size: {meta.get('bytes_uncompressed', 0):,} bytes")
-        print(f"Lines: {meta.get('lines', 0)}")
-        print(f"Compression: {meta.get('compression', 'unknown')}")
-
+            print(f"  {key}")
+            continue
+        level = meta.get('pinned', {}).get('level', 'none')
+        pin_status = f" [pinned:{level}]" if level != 'none' else ""
         source = meta.get('source', {})
-        if source:
-            print(f"\nSource:")
-            print(f"  Tool: {source.get('tool_name', 'unknown')}")
-            print(f"  Exit code: {source.get('exit_code', 'unknown')}")
-            if source.get('command'):
-                cmd = source['command']
-                if len(cmd) > 80:
-                    cmd = cmd[:77] + '...'
-                print(f"  Command: {cmd}")
+        tool = source.get('tool_name', 'unknown')
+        size = meta.get('bytes_uncompressed', 0)
+        print(f"  {key[:20]}...  {size:>8,} bytes  {tool}{pin_status}")
+    return 0
 
-        pinned = meta.get('pinned', {})
-        if pinned.get('level', 'none') != 'none':
-            print(f"\nPinned:")
-            print(f"  Level: {pinned.get('level')}")
-            print(f"  Reason: {pinned.get('reason', '')}")
-            print(f"  Pinned at: {pinned.get('pinned_at', 'unknown')}")
+
+def _normalize_key(key: str) -> str:
+    """Accept a blob path or bare hex where a key is expected."""
+    if not key or '/' not in key:
+        return key
+    basename = os.path.basename(key)
+    if basename.endswith(('.gz', '.zst', '.txt')):
+        basename = os.path.splitext(basename)[0]
+    if basename.startswith(('b2s:', 'sha256:')):
+        return basename
+    if basename and all(c in '0123456789abcdef' for c in basename):
+        return f'b2s:{basename}'
+    return key
+
+
+def _cmd_info(key: str) -> int:
+    meta = get_metadata(key)
+    if not meta:
+        print(f"Key not found: {key}", file=sys.stderr)
+        return 1
+    print(f"Key: {meta.get('key', key)}")
+    print(f"Created: {meta.get('created_at', 'unknown')}")
+    print(f"Last access: {meta.get('last_access_at', 'unknown')}")
+    print(f"Size: {meta.get('bytes_uncompressed', 0):,} bytes")
+    print(f"Lines: {meta.get('lines', 0)}")
+    print(f"Compression: {meta.get('compression', 'unknown')}")
+    source = meta.get('source', {})
+    if source:
+        print("\nSource:")
+        print(f"  Tool: {source.get('tool_name', 'unknown')}")
+        print(f"  Exit code: {source.get('exit_code', 'unknown')}")
+        if source.get('command'):
+            cmd = source['command']
+            if len(cmd) > 80:
+                cmd = cmd[:77] + '...'
+            print(f"  Command: {cmd}")
+    pinned = meta.get('pinned', {})
+    if pinned.get('level', 'none') != 'none':
+        print("\nPinned:")
+        print(f"  Level: {pinned.get('level')}")
+        print(f"  Reason: {pinned.get('reason', '')}")
+        print(f"  Pinned at: {pinned.get('pinned_at', 'unknown')}")
+    return 0
+
+
+MATCH_ALL_PATTERNS = ('.', '.*', '^', '.*$', '^.*$')
+
+
+def _require_filter(args, parser) -> None:
+    if any([args.grep, args.head, args.tail, args.lines, args.symbol, args.chars]):
         return
+    print("Error: At least one filter is required.", file=sys.stderr)
+    print("", file=sys.stderr)
+    print("Specify what you need:", file=sys.stderr)
+    print("  --grep PATTERN   Lines matching regex", file=sys.stderr)
+    print("  --head N         First N lines", file=sys.stderr)
+    print("  --tail N         Last N lines", file=sys.stderr)
+    print("  --lines N-M      Line range", file=sys.stderr)
+    print("  --symbol NAME    Function/class body via graph.db", file=sys.stderr)
+    print("  --chars A-B      Character range (for very long lines)", file=sys.stderr)
+    print("", file=sys.stderr)
+    print("For full content: --grep \".\" --reason \"why filtering isn't possible\"",
+          file=sys.stderr)
+    sys.exit(1)
 
-    # Validate: at least one filter required
-    has_filter = any([args.grep, args.head, args.tail, args.lines, args.symbol])
-    if not has_filter:
-        print("Error: At least one filter is required.", file=sys.stderr)
-        print("", file=sys.stderr)
-        print("Specify what you need:", file=sys.stderr)
-        print("  --grep PATTERN   Lines matching regex", file=sys.stderr)
-        print("  --head N         First N lines", file=sys.stderr)
-        print("  --tail N         Last N lines", file=sys.stderr)
-        print("  --lines N-M      Line range", file=sys.stderr)
-        print("  --symbol NAME    Function/class body via graph.db", file=sys.stderr)
-        print("", file=sys.stderr)
-        print("For full content: --grep \".\" --reason \"why filtering isn't possible\"", file=sys.stderr)
-        sys.exit(1)
 
-    # Validate: --grep "." or ".*" requires --reason
-    is_match_all = args.grep in ('.', '.*', '^', '.*$', '^.*$') if args.grep else False
-    if is_match_all and not args.reason:
+def _charge_full_retrieval(args, content: str) -> None:
+    """Spend the shared budget for a whole-content retrieval.
+
+    A 20-character --reason is an honor-system gate: it is satisfied without
+    friction (twice in this repo's own review session) and never says no.
+    The budget is the same finite, visibly-depleting pool cache-wrap uses for
+    passthrough, so full retrieval now costs something real.
+    """
+    if args.grep not in MATCH_ALL_PATTERNS:
+        return
+    if not args.reason:
         print("Error: Full retrieval (--grep \".\") requires --reason", file=sys.stderr)
         print("", file=sys.stderr)
         print("Explain why filtering isn't possible (min 20 chars):", file=sys.stderr)
-        print("  --grep \".\" --reason \"need complete file to edit multiple sections\"", file=sys.stderr)
+        print("  --grep \".\" --reason \"need complete file to edit multiple sections\"",
+              file=sys.stderr)
+        sys.exit(1)
+    if len(args.reason) < 20:
+        print(f"Error: --reason too short ({len(args.reason)} chars, need 20+)",
+              file=sys.stderr)
         sys.exit(1)
 
-    if args.reason and len(args.reason) < 20:
-        print(f"Error: --reason too short ({len(args.reason)} chars, need 20+)", file=sys.stderr)
-        print("", file=sys.stderr)
-        print("Explain why you need full content, e.g.:", file=sys.stderr)
-        print("  --reason \"editing file, need full context for changes\"", file=sys.stderr)
+    tokens = budget.estimate_tokens(content)
+    granted, left, resets_h = budget.spend(tokens, kind='full_retrieval')
+    if not granted:
+        print(f"Error: full retrieval needs ~{tokens / 1000:.1f}k tokens but only "
+              f"{left / 1000:.1f}k of the full-content budget remains "
+              f"(resets in {resets_h:.1f}h).", file=sys.stderr)
+        print("Narrow the filter (--symbol NAME, --grep PATTERN, --lines A-B) "
+              "or wait for the window to roll.", file=sys.stderr)
         sys.exit(1)
+    print(f"[budget: -{tokens / 1000:.1f}k tokens · {left / 1000:.1f}k left · "
+          f"resets in {resets_h:.1f}h]", file=sys.stderr)
 
-    # Get content
-    content = retrieve_content(key)
-    if content is None:
-        print(f"Key not found or content unavailable: {key}", file=sys.stderr)
+
+GREP_LINE_CAP = 2000
+GREP_WINDOW = 300
+
+
+def _window_match(line: str, pattern) -> str:
+    """Trim an over-long matched line to a window around the match.
+
+    Returning an 18k-character line because it happened to contain the match
+    is never what the caller wanted, and it is what made grep useless on
+    JSONL and minified blobs. The char offset makes --chars actionable.
+    """
+    if len(line) <= GREP_LINE_CAP:
+        return line
+    m = pattern.search(line)
+    at = m.start() if m else 0
+    lo = max(0, at - GREP_WINDOW)
+    hi = min(len(line), at + GREP_WINDOW)
+    return (f'[c{lo + 1}-{hi} of {len(line)} chars] '
+            f'{"…" if lo else ""}{line[lo:hi]}{"…" if hi < len(line) else ""}')
+
+
+def _slice_chars(content: str, spec: str) -> str:
+    """Character-range slice of the raw content (1-indexed, inclusive)."""
+    try:
+        if '-' in spec:
+            start_s, end_s = spec.split('-', 1)
+            start = int(start_s) if start_s else 1
+            end = int(end_s) if end_s else len(content)
+        else:
+            start = end = int(spec)
+    except ValueError:
+        print(f'Invalid character range: {spec}', file=sys.stderr)
         sys.exit(1)
+    return content[max(0, start - 1):end]
 
-    lines = content.splitlines()
-    original_count = len(lines)
+
+def _warn_wide_coverage(args, original_count: int) -> None:
+    """Warn when --lines/--head/--tail covers ~all content with no narrowing.
+
+    Same anti-pattern as --grep "." but via line-based bypasses.
+    """
+    if not original_count or args.grep or args.symbol:
+        return
+    coverage = None
+    if args.head:
+        coverage = min(args.head, original_count)
+    elif args.tail:
+        coverage = min(args.tail, original_count)
+    elif args.lines:
+        try:
+            if '-' in args.lines:
+                start_s, end_s = args.lines.split('-', 1)
+                start = int(start_s) if start_s else 1
+                end = int(end_s) if end_s else original_count
+            else:
+                start = end = int(args.lines)
+            coverage = max(0, min(end, original_count) - max(1, start) + 1)
+        except ValueError:
+            coverage = None
+    if coverage is not None and coverage >= 0.9 * original_count:
+        print(f"[cch: this returns {coverage} of {original_count} lines — "
+              f"filtering is not narrowing anything. Prefer --symbol NAME or a "
+              f"specific --grep PATTERN.]", file=sys.stderr)
+
+
+def _apply_filters(lines: list, args) -> tuple[list, bool]:
+    """Apply symbol/lines/grep/head/tail in order. Returns (lines, filtered)."""
     filtered = False
 
-    # Warn when --lines/--head/--tail covers ~all content with no narrowing.
-    # Same anti-pattern as --grep "." but via line-based bypasses — defeats
-    # the stub mechanism and pulls full content back into context.
-    if original_count and not args.grep and not args.symbol:
-        coverage = None
-        if args.head:
-            coverage = min(args.head, original_count)
-        elif args.tail:
-            coverage = min(args.tail, original_count)
-        elif args.lines:
-            try:
-                if '-' in args.lines:
-                    _s, _e = args.lines.split('-', 1)
-                    _s = int(_s) if _s else 1
-                    _e = int(_e) if _e else original_count
-                else:
-                    _s = _e = int(args.lines)
-                coverage = max(0, min(_e, original_count) - max(0, _s - 1))
-            except ValueError:
-                coverage = None
-        if coverage is not None and coverage / original_count >= 0.9:
-            pct = int(100 * coverage / original_count)
-            est_tokens = original_count * 8
-            print(
-                f"[ccm-get: wasteful retrieval — {coverage}/{original_count} lines "
-                f"({pct}%) pulls full content into context (~{est_tokens} tokens), "
-                f"defeating the cache stub. Narrow with --grep PATTERN, "
-                f"--symbol NAME, or a smaller --lines A-B.]",
-                file=sys.stderr,
-            )
-
-    # Apply filters in order: symbol → lines range → grep → head/tail
-    # This allows: --grep error --head 10 = "first 10 errors"
-
-    # Symbol filter - resolve to line range via graph.db
+    # Symbol first: it selects the region the rest of the filters work within,
+    # so `--symbol X --lines 1-5` means "lines 1-5 OF X".
     if args.symbol:
         resolved = _resolve_symbol_lines(args.symbol)
         if resolved is None:
@@ -368,81 +441,128 @@ Full retrieval (--grep ".") requires --reason explaining why filtering isn't pos
         lines = lines[max(0, sym_start - 1):sym_end]
         filtered = True
 
-    # Line range filter (1-indexed) - applied first to limit search scope
     if args.lines:
         try:
             if '-' in args.lines:
-                start, end = args.lines.split('-', 1)
-                start = int(start) if start else 1
-                end = int(end) if end else len(lines)
+                start_s, end_s = args.lines.split('-', 1)
+                start = int(start_s) if start_s else 1
+                end = int(end_s) if end_s else len(lines)
             else:
                 start = end = int(args.lines)
-            # Convert to 0-indexed
-            lines = lines[max(0, start-1):end]
-            filtered = True
         except ValueError:
             print(f"Invalid line range: {args.lines}", file=sys.stderr)
             sys.exit(1)
+        lines = lines[max(0, start - 1):end]
+        filtered = True
 
-    # Grep filter - before head/tail so --head N means "first N matches"
+    # Grep before head/tail, so `--grep X --head N` means "first N matches".
     if args.grep:
         try:
-            flags = re.IGNORECASE if args.ignore_case else 0
-            pattern = re.compile(args.grep, flags)
+            pattern = re.compile(args.grep, re.IGNORECASE if args.ignore_case else 0)
         except re.error as e:
             print(f"Invalid regex: {e}", file=sys.stderr)
             sys.exit(1)
 
         if args.context > 0:
-            # Grep with context
             matched_indices = set()
             for i, line in enumerate(lines):
                 if pattern.search(line):
-                    for j in range(max(0, i - args.context), min(len(lines), i + args.context + 1)):
+                    for j in range(max(0, i - args.context),
+                                   min(len(lines), i + args.context + 1)):
                         matched_indices.add(j)
-
             result_lines = []
             prev_idx = -2
             for i in sorted(matched_indices):
                 if prev_idx >= 0 and i > prev_idx + 1:
-                    result_lines.append('--')  # Context separator
+                    result_lines.append('--')  # context separator
                 result_lines.append(lines[i])
                 prev_idx = i
             lines = result_lines
         else:
-            # Simple grep
-            lines = [l for l in lines if pattern.search(l)]
+            lines = [line for line in lines if pattern.search(line)]
+        lines = [_window_match(line, pattern) for line in lines]
         filtered = True
 
-    # Head filter - after grep, so --grep X --head N = "first N matches"
     if args.head:
         lines = lines[:args.head]
         filtered = True
 
-    # Tail filter - after grep, so --grep X --tail N = "last N matches"
     if args.tail:
         lines = lines[-args.tail:]
         filtered = True
 
-    # Output
-    output = '\n'.join(lines)
+    return lines, filtered
 
-    # Log retrieval for analysis (after filtering to capture returned size)
+
+def main():
+    parser = _build_parser()
+    args = parser.parse_args()
+
+    init_ccm_cache()
+
+    if args.check:
+        return _cmd_check()
+    if args.stats:
+        return _cmd_stats()
+    if args.budget:
+        return _cmd_budget()
+    if args.prune:
+        return _cmd_prune(args)
+    if args.list:
+        return _cmd_list(args)
+
+    key = _normalize_key(args.key)
+
+    if args.last:
+        last = get_last_key()
+        if not last:
+            print("No cached items found", file=sys.stderr)
+            sys.exit(1)
+        if args.key:
+            print(f"Note: Using --last key: {last}", file=sys.stderr)
+        key = last
+
+    if not key:
+        parser.print_help()
+        sys.exit(1)
+
+    if args.info:
+        return _cmd_info(key)
+
+    _require_filter(args, parser)
+
+    content = retrieve_content(key)
+    if content is None:
+        print(f"Key not found or content unavailable: {key}", file=sys.stderr)
+        sys.exit(1)
+
+    _charge_full_retrieval(args, content)
+
+    original_chars = len(content)
+    char_sliced = False
+    if args.chars:
+        content = _slice_chars(content, args.chars)
+        char_sliced = True
+
+    lines = content.splitlines()
+    original_count = len(lines)
+    _warn_wide_coverage(args, original_count)
+
+    lines, filtered = _apply_filters(lines, args)
+    filtered = filtered or char_sliced
+
+    output = '\n'.join(lines)
     log_retrieval(key, args, returned_bytes=len(output.encode('utf-8')))
 
-    if filtered:
+    if char_sliced:
+        print(f"[Filtered: {len(output)} of {original_chars} chars]", file=sys.stderr)
+    elif filtered:
         print(f"[Filtered: {len(lines)} of {original_count} lines]", file=sys.stderr)
     sys.stdout.write(output)
     if output and not output.endswith('\n'):
         sys.stdout.write('\n')
+    return 0
 
 
 if __name__ == '__main__':
-    # CCH helper: refusals/errors print to stderr but must NOT exit non-zero.
-    # A non-zero exit inside a parallel Bash batch makes the harness cancel
-    # every sibling tool call (cascade). Real crashes (uncaught exceptions)
-    # still surface naturally; argparse/sys.exit refusals are downgraded to 0.
-    try:
-        main()
-    except SystemExit:
-        pass
+    sys.exit(main() or 0)

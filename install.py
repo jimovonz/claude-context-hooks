@@ -46,6 +46,9 @@ SETTINGS_FILE = Path.home() / '.claude' / 'settings.json'
 CLAUDE_MD = Path.home() / '.claude' / 'CLAUDE.md'
 SNIPPET_FILE = REPO_ROOT / 'docs' / 'CLAUDE_MD_SNIPPET.md'
 
+sys.path.insert(0, str(HOOKS_SRC))
+from lib.atomic import atomic_write_text  # noqa: E402
+
 # Sentinel markers around the auto-managed routing-policy block in
 # ~/.claude/CLAUDE.md. Re-installs replace whatever sits between them;
 # --remove strips the block entirely. Anything outside is left alone.
@@ -68,11 +71,19 @@ HOOK_FILES = [
     'cch-write.py',
     'ccm-get.py',
     'ssh-tool.py',
+    'cch-html.py',
+    'cch-eval.py',
     'lib/__init__.py',
     'lib/ccm_cache.py',
     'lib/event_log.py',
     'lib/cairn_graph_footer.py',
     'lib/cch_rules.py',
+    'lib/atomic.py',
+    'lib/guards.py',
+    'lib/budget.py',
+    'lib/delta.py',
+    'lib/outline.py',
+    'lib/supersede.py',
     'cch-gain.py',
 ]
 
@@ -88,6 +99,8 @@ BIN_FILES = [
     'ccm-get.py',
     'cch-gain.py',
     'ssh-tool.py',
+    'cch-html.py',
+    'cch-eval.py',
 ]
 
 # settings.json structure. PreToolUse:Bash is appended (not replacing
@@ -456,8 +469,14 @@ def merge_settings() -> None:
     if SETTINGS_FILE.exists():
         try:
             settings = json.loads(SETTINGS_FILE.read_text())
-        except json.JSONDecodeError:
-            print(f'  WARNING: cannot parse {SETTINGS_FILE}, starting fresh')
+        except json.JSONDecodeError as e:
+            # NEVER fall through to an empty dict: this function writes the
+            # file unconditionally a few lines down, so 'starting fresh'
+            # obliterates the user's permissions, env block and RTK's own
+            # hook registration. A parse failure is fatal, not recoverable.
+            print(f'  ERROR: cannot parse {SETTINGS_FILE}: {e}')
+            print('  Refusing to overwrite it — fix the JSON and re-run.')
+            raise SystemExit(1)
 
     hooks = settings.setdefault('hooks', {})
     pretool = hooks.setdefault('PreToolUse', [])
@@ -486,7 +505,7 @@ def merge_settings() -> None:
         print(f'  ADD  {event}:{matcher} {command}')
 
     SETTINGS_FILE.parent.mkdir(parents=True, exist_ok=True)
-    SETTINGS_FILE.write_text(json.dumps(settings, indent=2) + '\n')
+    atomic_write_text(SETTINGS_FILE, json.dumps(settings, indent=2) + '\n')
     print(f'\n  Settings written to {SETTINGS_FILE}')
 
 
@@ -507,11 +526,11 @@ def install_instructions() -> None:
         # Strip the leading newline we add so we don't accumulate blank
         # lines on repeated installs.
         new = before.rstrip() + '\n' + block.lstrip('\n') + after.lstrip('\n')
-        CLAUDE_MD.write_text(new)
+        atomic_write_text(CLAUDE_MD, new)
         print(f'  UPDATE CLAUDE.md routing-policy block ({CLAUDE_MD})')
     else:
         new = existing.rstrip("\n") + "\n" + block.lstrip("\n") if existing else block.lstrip("\n")
-        CLAUDE_MD.write_text(new)
+        atomic_write_text(CLAUDE_MD, new)
         action = "APPEND" if existing else "CREATE"
         print(f"  {action} CLAUDE.md routing-policy block ({CLAUDE_MD})")
 
@@ -526,7 +545,7 @@ def remove_instructions() -> None:
     _, _, after = rest.partition(INSTRUCTIONS_END)
     new = (before.rstrip() + '\n' + after.lstrip('\n')).strip() + '\n'
     if new.strip():
-        CLAUDE_MD.write_text(new)
+        atomic_write_text(CLAUDE_MD, new)
     else:
         CLAUDE_MD.unlink()
     print(f'  STRIP CLAUDE.md routing-policy block ({CLAUDE_MD})')
@@ -575,7 +594,7 @@ def remove() -> None:
         if not settings['hooks']:
             settings.pop('hooks')
 
-    SETTINGS_FILE.write_text(json.dumps(settings, indent=2) + '\n')
+    atomic_write_text(SETTINGS_FILE, json.dumps(settings, indent=2) + '\n')
     print(f'\n  Removed {removed_reg} hook registrations from {SETTINGS_FILE}')
     print(f'  Removed {removed_files} symlinks from {HOOKS_DST}')
 

@@ -21,7 +21,11 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
 
-from lib.event_log import log_event
+try:
+    from lib.event_log import log_event
+except Exception:                       # logging must never break a hook
+    def log_event(*_args, **_kwargs):
+        return None
 
 REASON = (
     "BLOCKED: Use cch-edit.py {path} 'old_source' 'new_source' (JSON literal match).\n"

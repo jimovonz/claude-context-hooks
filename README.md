@@ -68,17 +68,31 @@ your `~/.claude/CLAUDE.md` so the model knows how to route.
 | `hooks/cch-batch.py`          | Runs many commands concurrently in one tool call (fan-out, cascade-immune, same-file writes auto-serialized) |
 | `hooks/cch-html.py`           | HTML→text with JS-render escalation (static → JSON island → headless Chrome) |
 | `hooks/lib/cch_rules.py`      | Glob-scoped project rules (.cch/rules/*.md) injected once/session on matching file touch |
-| `hooks/ccm-get.py`            | Filtered cache retrieval (`--grep` / `--head` / `--tail` / `--lines`); `--check` verifies a stub |
-| `hooks/cch-edit.py`           | Literal-string edit: exact match, uniqueness check, atomic write, unified diff |
+| `hooks/ccm-get.py`            | Filtered cache retrieval (`--grep`/`--head`/`--tail`/`--lines`/`--symbol`/`--chars`); `--check` verifies a stub; `--budget`, `--prune` |
+| `hooks/cch-edit.py`           | Literal-string edit: exact match, uniqueness check, atomic write, unified diff; `--symbol NAME` replaces a graph-resolved span |
 | `hooks/cch-write.py`          | Atomic file write from stdin; creates parent directories     |
-| `hooks/lib/ccm_cache.py`      | Content-addressable cache (BLAKE2s, zstd/gzip)               |
+| `hooks/lib/ccm_cache.py`      | Content-addressable cache (BLAKE2s, zstd/gzip), TTL + size pruning |
+| `hooks/lib/guards.py`        | Command guards shared by the Bash hook and cch-batch (bulk-read block, graph answer, rg -r warning; one-shot overridable) |
+| `hooks/lib/atomic.py`        | Symlink-resolving atomic writes with unique staging files    |
+| `hooks/lib/budget.py`        | Finite, flock-serialized full-content budget over a rolling window |
+| `hooks/lib/delta.py`         | Per-session emission dedup: unchanged output collapses, changed output diffs |
+| `hooks/lib/outline.py`       | Extractive stub outline: producer-delimited sections + line-length profile (counts and verbatim labels only, never paraphrase) |
+| `hooks/lib/supersede.py`     | Supersession index + `may_elide` — CCH's half of [docs/CONTRACT.md](docs/CONTRACT.md), the seam with the Cairn proxy |
+| `hooks/cch-gain.py`          | Token report: net accounting + friction ranking; `--dist` size histogram, `--retrieval` orphan/slice analysis, `--outline` stub-index effectiveness |
+| `hooks/cch-eval.py`          | Did compression keep the answer? Offline reachability suite — a planted canary must be recoverable using only what the stub advertises. No model, no network, no key |
 
 ## Environment variables
 
 | Var                     | Effect                                                  |
 | ----------------------- | ------------------------------------------------------- |
 | `CCH_DISABLE=1`         | All hooks pass through (debug escape hatch)             |
-| `CCH_CACHE_THRESHOLD`   | Bytes threshold for caching Bash output (default 8000)  |
+| `CCH_CACHE_THRESHOLD`   | Bytes threshold for caching Bash output (default 8000 — the measured break-even; below it a retrieved stub costs more than the output it replaced) |
+| `CCH_PASSTHROUGH_BUDGET` | Full-content token budget per 5h window, shared by uncached passthrough and `ccm-get --grep "."` (default 25000; 0 disables) |
+| `CCH_DELTA_MIN_BYTES`  | Minimum output size before repeat-emission collapses to `[CCM_UNCHANGED]` / `[CCM_DELTA]` (default 1000) |
+| `CCH_CACHE_TTL_DAYS`   | Age at which unpinned cache entries are evicted (default 14) |
+| `CCH_CACHE_MAX_MB`     | Cache size cap, oldest evicted first (default 256)      |
+| `CCH_HTML_MAX_BYTES`   | Hard cap on a single `cch-html --url` fetch (default 8 MB) |
+| `CCH_HTML_NO_SANDBOX=1` | Allow `--no-sandbox` for the headless-Chrome rung (needed only as root / in a container) |
 | `CCH_PROPAGATE_EXIT=1`  | Restore raw Bash exit propagation (default: fail-soft — non-zero reported as 0 to the harness, real code carried in-band as `[exit N]`) |
 
 ## Tests
