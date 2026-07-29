@@ -17,9 +17,10 @@ Two layers:
       bytes are still on disk. Requires no API key and belongs in CI.
 
   accuracy (--accuracy, needs an API key)
-      Ask a model the question under two arms — full content, versus stub
-      with retrieval available — and compare the answers. This is the arm
-      that matches what other compression layers report.
+      Ask a model the question under two arms — full content, versus stub —
+      and compare the answers. This is the arm that matches what other
+      compression layers report. Raw HTTP over urllib, no SDK: the project
+      is stdlib-only and an eval harness is a poor reason to change that.
 
 Usage:
   cch-eval.py                 # reachability suite
@@ -174,43 +175,71 @@ def render(results) -> str:
     return '\n'.join(out)
 
 
-def run_accuracy():
-    """Model A/B: full content vs stub+retrieval. Needs an API key.
+def _credentials():
+    """(headers, source) for the Messages API, or (None, reason).
 
-    UNVERIFIED — written against the documented SDK surface but never
-    executed, because no anthropic SDK or credential was available where
-    this was built. Treat the first run as the test.
+    No SDK: the whole project is stdlib-only apart from an optional
+    zstandard, and an eval harness is a poor reason to make `anthropic` the
+    first hard dependency. Raw HTTP to /v1/messages is a dozen lines.
     """
-    try:
-        import anthropic
-    except ImportError:
-        return None, 'anthropic SDK not installed (pip install anthropic)'
-    if not (os.environ.get('ANTHROPIC_API_KEY') or os.environ.get('ANTHROPIC_AUTH_TOKEN')):
-        return None, 'no ANTHROPIC_API_KEY / ANTHROPIC_AUTH_TOKEN set'
+    key = os.environ.get('ANTHROPIC_API_KEY')
+    if key:
+        return {'x-api-key': key}, 'ANTHROPIC_API_KEY'
 
-    client = anthropic.Anthropic()
+    token = os.environ.get('ANTHROPIC_AUTH_TOKEN')
+    if token:
+        return ({'Authorization': f'Bearer {token}',
+                 'anthropic-beta': 'oauth-2025-04-20'}, 'ANTHROPIC_AUTH_TOKEN')
+
+    claude_creds = Path.home() / '.claude' / '.credentials.json'
+    if claude_creds.exists():
+        return None, (f'no ANTHROPIC_API_KEY / ANTHROPIC_AUTH_TOKEN set. '
+                      f'{claude_creds} exists but belongs to Claude Code — '
+                      f'export a key of your own rather than borrowing it')
+    return None, 'no ANTHROPIC_API_KEY / ANTHROPIC_AUTH_TOKEN set'
+
+
+def _ask(headers, model: str, prompt: str, max_tokens: int = 64):
+    """One Messages API call. Returns (text, input_tokens)."""
+    import urllib.error
+    import urllib.request
+
+    body = json.dumps({'model': model, 'max_tokens': max_tokens,
+                       'messages': [{'role': 'user', 'content': prompt}]}).encode()
+    req = urllib.request.Request(
+        'https://api.anthropic.com/v1/messages', data=body,
+        headers={'content-type': 'application/json',
+                 'anthropic-version': '2023-06-01', **headers})
+    with urllib.request.urlopen(req, timeout=120) as resp:
+        payload = json.loads(resp.read().decode('utf-8'))
+    text = ''.join(b.get('text', '') for b in payload.get('content', [])
+                   if b.get('type') == 'text')
+    return text, (payload.get('usage') or {}).get('input_tokens')
+
+
+def run_accuracy():
+    """Model A/B: full content vs stub. Returns (results, skip_reason)."""
+    headers, source = _credentials()
+    if headers is None:
+        return None, source
+
     model = os.environ.get('CCH_EVAL_MODEL', 'claude-haiku-4-5')
+    question = ('The text above contains a canary token beginning "ZX9". '
+                'Reply with that token and nothing else.')
     results = []
-    for name, content, term in _fixtures():
-        question = (f'The text contains a canary token starting with "ZX9". '
-                    f'Reply with that token and nothing else.')
+    for name, content, _term in _fixtures():
         with tempfile.TemporaryDirectory() as d:
             home = Path(d)
-            stub, key = _stub(content, home, name)
-            arms = {'full': content, 'stub': stub}
-            row = {'fixture': name}
-            for arm, payload in arms.items():
+            stub, _key = _stub(content, home, name)
+            row = {'fixture': name, 'credential': source, 'model': model}
+            for arm, payload in (('full', content), ('stub', stub)):
                 try:
-                    resp = client.messages.create(
-                        model=model, max_tokens=64,
-                        messages=[{'role': 'user',
-                                   'content': f'{payload}\n\n{question}'}])
-                    text = ''.join(b.text for b in resp.content if b.type == 'text')
+                    text, tokens = _ask(headers, model, f'{payload}\n\n{question}')
                     row[arm] = NEEDLE in text
-                    row[f'{arm}_in'] = resp.usage.input_tokens
+                    row[f'{arm}_in'] = tokens
                 except Exception as exc:
                     row[arm] = None
-                    row[f'{arm}_error'] = str(exc)[:120]
+                    row[f'{arm}_error'] = str(exc)[:160]
             results.append(row)
     return results, None
 
