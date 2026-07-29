@@ -56,9 +56,12 @@ questions. Read it before changing direction.
     normalization inside the review pass's `atomic_write_text` — taking the
     review pass's version verbatim breaks `test_install_idempotent_on_claude_md`
     (its trailing-newline handling is not byte-stable across re-installs).
-- Installed locally: 14 symlinks in `~/.claude/hooks/`, 3 helper
-  symlinks in `~/.local/bin/` (`cch-edit.py`, `cch-write.py`,
-  `ccm-get.py`), 8 PreToolUse entries in `~/.claude/settings.json`.
+- Installed locally (reinstalled 2026-07-30 after the merge): 29 symlinks in
+  `~/.claude/hooks/` (18 top-level + 11 under `lib/`), 8 helpers on PATH via
+  `~/.local/bin/` (`cch-batch`, `cch-edit`, `cch-eval`, `cch-gain`, `cch-html`,
+  `cch-write`, `ccm-get`, `ssh-tool`), 9 PreToolUse entries in
+  `~/.claude/settings.json`. No `CCH_CACHE_THRESHOLD` in the env block — the
+  8000 default is the resolved value, so overriding it would be the regression.
 - Live smoke test 2026-05-02 confirmed: RTK rewrite + cache stub +
   `ccm-get.py` slice retrieval + bare helper invocation + deny+redirect
   on Read/WebFetch/Write all work. Edit deny is shadowed by the harness
