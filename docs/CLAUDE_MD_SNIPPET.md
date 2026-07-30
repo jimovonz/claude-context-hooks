@@ -182,6 +182,6 @@ identical command once.
 
 **Reading code:** never `cat` a code file top-to-bottom — the
 `_check_bulk_read` block fires on `cat` of code files. Get the range with
-`cairn-graph --location SYMBOL`, then `sed -n 'A,Bp;Bq'` narrowed to the function (the `;Bq` makes sed quit at line B instead of reading to EOF — 125x faster on a large file).
+`cairn-graph --location SYMBOL`, then `sed -n 'A,Bp;Bq'` narrowed to the function (the `;Bq` makes sed quit at line B rather than reading to EOF: a no-op on ordinary source files, where process spawn is ~84% of the cost, but 125x on a large log or data file).
 Even a 200-line `sed` window when you need 50 lines around a function wastes
 context.
