@@ -436,6 +436,56 @@ def consume_override(cmd: str) -> bool:
     return False
 
 
+_PYTEST_EXIT_MASKED = (
+    "pytest piped into head/tail discards its exit status — a pipeline reports "
+    "the LAST command's code, so a failing suite reads as success. This is not "
+    "hypothetical: it produced a false green that was committed on. Either drop "
+    "the pipe and read the summary line, or make the status survive: "
+    "`set -o pipefail; pytest ... | tail -3`."
+)
+
+_PYTEST_PIPE_RE = re.compile(r'\bpytest\b[^|]*\|\s*(?:tail|head)\b')
+
+
+def check_pytest_exit_masked(cmd: str) -> Optional[str]:
+    """Block a pytest pipeline whose exit status is thrown away.
+
+    `pytest ... | tail -2` is the natural way to keep output short, and it is
+    exactly why the failure is easy to miss: the summary line scrolls past while
+    the shell reports 0. `set -o pipefail` restores the real status, so the
+    guard asks for that rather than banning the pipe.
+    """
+    if 'pipefail' in cmd:
+        return None
+    return _PYTEST_EXIT_MASKED if _PYTEST_PIPE_RE.search(cmd) else None
+
+
+_SELF_REPLACE = (
+    "A global replace whose REPLACEMENT contains the SEARCH string rewrites its "
+    "own output: every later match is one the substitution itself produced. Drop "
+    "--all and edit the occurrences you mean, or make the replacement not "
+    "contain the original text."
+)
+
+
+def check_self_referential_replace(cmd: str) -> Optional[str]:
+    """Block `cch-edit --all OLD NEW` when NEW contains OLD."""
+    for seg in segments(cmd):
+        try:
+            toks = shlex.split(_strip_rtk(seg))
+        except ValueError:
+            continue
+        if not toks or not os.path.basename(toks[0]).startswith('cch-edit'):
+            continue
+        if '--all' not in toks:
+            continue
+        positionals = [t for t in toks[1:] if not t.startswith('-')]
+        # cch-edit.py PATH OLD NEW
+        if len(positionals) >= 3 and positionals[1] and positionals[1] in positionals[2]:
+            return _SELF_REPLACE
+    return None
+
+
 def block(cmd: str, cwd: str = '') -> Optional[str]:
     """The blocking guard. Returns a reason, or None to allow the command.
 
@@ -443,7 +493,8 @@ def block(cmd: str, cwd: str = '') -> Optional[str]:
     the model always has a way forward without a second tool round-trip
     guessing at what would satisfy the guard.
     """
-    reason = check_bulk_read(cmd) or check_symbol_grep(cmd, cwd)
+    reason = (check_bulk_read(cmd) or check_symbol_grep(cmd, cwd)
+              or check_pytest_exit_masked(cmd) or check_self_referential_replace(cmd))
     if not reason:
         return None
     if consume_override(cmd):
