@@ -32,6 +32,7 @@ Usage:
 
 import argparse
 import json
+import re
 import sys
 from collections import defaultdict
 from datetime import datetime, timedelta
@@ -443,6 +444,93 @@ def render_outline(since: datetime, days: int) -> str:
     return '\n'.join(out)
 
 
+# Navigation intent, classified from cmd_head. The graph answers the first
+# group directly; the other two are the model navigating by reading instead.
+_NAV_GRAPH = re.compile(r'(?<![-\w])cairn-graph\b')
+_NAV_CODE_EXT = r'\.(?:py|js|ts|tsx|jsx|c|h|cc|cpp|hpp|rs|go|java|rb|v|sv|sh)\b'
+_NAV_READ = re.compile(r'(?<![-\w])(?:sed|cat|head|tail)\b')
+_NAV_SEARCH = re.compile(r'(?<![-\w])(?:rg|grep|egrep|fgrep)\b')
+_NAV_IDENT = re.compile(r'''["']?(?:(?:def|class|fn|func|function)\s+)?([A-Za-z_][A-Za-z0-9_]{2,})["']?''')
+
+
+def _nav_kind(cmd: str):
+    """'graph' | 'search' | 'read' | None — how this command navigated code.
+
+    Only the first pipeline segment is the navigation act; a trailing
+    `| grep x` narrows a result set rather than locating anything.
+    """
+    head = cmd.split('|')[0]
+    if _NAV_GRAPH.search(head):
+        return 'graph'
+    if _NAV_SEARCH.search(head) and _NAV_IDENT.search(head):
+        return 'search'
+    if _NAV_READ.search(head) and re.search(_NAV_CODE_EXT, head):
+        return 'read'
+    return None
+
+
+def render_tools(since: datetime, days: int) -> str:
+    """Is the graph being used where it is the cheaper tool?
+
+    graph-first% = graph / (graph + symbol-shaped search + code read). The
+    denominator is navigation the graph could have served, so this measures
+    tool choice, not activity. Reported per session because that is the unit
+    an intervention acts on — a lifetime number cannot be a control arm,
+    since it moves only as fast as its own tail.
+
+    Session attribution arrived with the 2026-07 review pass, so commands
+    logged before it carry no sid and are counted only in the totals line.
+    """
+    overall = defaultdict(int)
+    per_sid = defaultdict(lambda: defaultdict(int))
+    for row in _read_jsonl(EVENTS_LOG):
+        if _parse_ts(row.get('ts', '')) < since:
+            continue
+        if row.get('event') != 'cache_wrap':
+            continue
+        kind = _nav_kind(row.get('cmd_head') or '')
+        if not kind:
+            continue
+        overall[kind] += 1
+        sid = row.get('sid')
+        if sid:
+            per_sid[sid][kind] += 1
+
+    def _rate(c) -> float:
+        denom = c['graph'] + c['search'] + c['read']
+        return 100.0 * c['graph'] / denom if denom else 0.0
+
+    out = [f'=== Tool utilisation, last {days}d (since {since.date()}) ===', '']
+    denom = overall['graph'] + overall['search'] + overall['read']
+    if not denom:
+        return '\n'.join(out + ['No navigation commands in window.'])
+    out.append(f'  navigation commands: {denom}')
+    out.append(f'    cairn-graph          {overall["graph"]:6d}')
+    out.append(f'    symbol-shaped search {overall["search"]:6d}')
+    out.append(f'    code file read       {overall["read"]:6d}')
+    out.append(f'  GRAPH-FIRST: {_rate(overall):.1f}%')
+    out.append('')
+
+    navsess = {s: c for s, c in per_sid.items()
+               if c['graph'] + c['search'] + c['read'] >= 5}
+    if not navsess:
+        out.append('  No attributed session has >=5 navigation commands yet —')
+        out.append('  per-session rates need sid coverage to accumulate before')
+        out.append('  they can serve as a baseline or an A/B arm.')
+        return '\n'.join(out)
+
+    out.append(f'  by session (>=5 navigation commands, n={len(navsess)}):')
+    out.append(f'    {"session":16s} {"graph":>6s} {"search":>7s} {"read":>6s} {"graph-first":>12s}')
+    for sid, c in sorted(navsess.items(), key=lambda kv: -_rate(kv[1])):
+        out.append(f'    {sid[:16]:16s} {c["graph"]:6d} {c["search"]:7d} '
+                   f'{c["read"]:6d} {_rate(c):11.1f}%')
+    rates = [_rate(c) for c in navsess.values()]
+    out.append('')
+    out.append(f'  median session graph-first: {sorted(rates)[len(rates) // 2]:.1f}%')
+    out.append(f'  sessions at 0%: {sum(1 for r in rates if r == 0)}/{len(rates)}')
+    return '\n'.join(out)
+
+
 def render_dist(since: datetime, days: int) -> str:
     sizes = []
     for row in _read_jsonl(EVENTS_LOG):
@@ -643,6 +731,7 @@ def main() -> int:
     p.add_argument('--dist', action='store_true', help='Print cache_wrap original_bytes histogram + threshold trial')
     p.add_argument('--retrieval', action='store_true', help='Per-cache retrieval-ratio analysis (orphan rate + slice distribution)')
     p.add_argument('--outline', action='store_true', help='Did stub indexes change retrieval behaviour? (sections vs profile-only)')
+    p.add_argument('--tools', action='store_true', help='graph-first%% — is cairn-graph used where it is the cheaper tool?')
     args = p.parse_args()
 
     if args.since:
@@ -684,6 +773,10 @@ def main() -> int:
 
     if args.outline:
         print(render_outline(since, days))
+        return 0
+
+    if args.tools:
+        print(render_tools(since, days))
         return 0
 
     agg = aggregate(since)
