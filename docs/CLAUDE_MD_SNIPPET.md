@@ -11,7 +11,7 @@ equivalent.
 
 | Want                          | Use                               |
 | ----------------------------- | --------------------------------- |
-| Inspect a text file           | `cat PATH` / `head -n N PATH` / `sed -n 'A,Bp' PATH` |
+| Inspect a text file           | `cat PATH` / `head -n N PATH` / `sed -n 'A,Bp;Bq' PATH` |
 | Search file contents          | `rg -n PATTERN PATH` (with `-C`, `--type`, `-l` as needed) |
 | List files                    | `fd PATTERN PATH` / `find PATH -name 'GLOB' -type f` |
 | Fetch a URL                   | `curl -sSL URL` (large HTML output auto-converts to text via cch-html) |
@@ -182,6 +182,6 @@ identical command once.
 
 **Reading code:** never `cat` a code file top-to-bottom — the
 `_check_bulk_read` block fires on `cat` of code files. Get the range with
-`cairn-graph --location SYMBOL`, then `sed -n A,Bp` narrowed to the function.
+`cairn-graph --location SYMBOL`, then `sed -n 'A,Bp;Bq'` narrowed to the function (the `;Bq` makes sed quit at line B instead of reading to EOF — 125x faster on a large file).
 Even a 200-line `sed` window when you need 50 lines around a function wastes
 context.

@@ -44,7 +44,7 @@ def _save_seen(seen: set) -> None:
 def _extract_line_range(command: str) -> tuple[Optional[int], Optional[int]]:
     """Extract (start, end) line range from sed -n or head -n commands."""
     stripped = re.sub(r'^rtk\s+', '', command.strip())
-    m = re.match(r"""^sed\s+-n\s+['"](\d+),(\d+)p['"]""", stripped)
+    m = re.match(r"""^sed\s+-n\s+['"](\d+),(\d+)p(?:\s*;\s*\d*q)?['"]""", stripped)
     if m:
         return int(m.group(1)), int(m.group(2))
     m = re.match(r'^head\b.*?(?:-n\s*|-(?=\d))(\d+)', stripped)

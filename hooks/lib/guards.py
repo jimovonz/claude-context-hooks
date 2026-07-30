@@ -46,7 +46,7 @@ _BULK_WARN_PREFIX = (
     "cairn-graph --location SYMBOL for targeted reads]"
 )
 _BULK_READ_REDIRECT = (
-    "BLOCKED: Run cairn-graph --location SYMBOL first, then sed -n 'A,Bp' on "
+    "BLOCKED: Run cairn-graph --location SYMBOL first, then sed -n 'A,Bp;Bq' on "
     "the result."
 )
 _OVERRIDE_HINT = " (rerun the identical command to override once)"
@@ -92,8 +92,40 @@ _SEGMENT_RE = re.compile(r'\|\||&&|[|;&]')
 
 
 def segments(cmd: str) -> list[str]:
-    """Shell segments of a command line (split on | || && ; &)."""
-    return [s.strip() for s in _SEGMENT_RE.split(cmd) if s.strip()]
+    """Shell segments of a command line (split on | || && ; &).
+
+    Quote-aware: a separator *inside* quotes is data, not a separator. The
+    naive split fragmented `sed -n '1,200p;200q' f.py` into two segments and
+    so silently lost warn_bulk_sed — and the early-quit form is exactly what
+    we now tell the model to use, since plain `sed -n 'A,Bp'` reads to EOF.
+    """
+    out: list[str] = []
+    buf: list[str] = []
+    quote = None
+    i = 0
+    while i < len(cmd):
+        c = cmd[i]
+        if quote is not None:
+            buf.append(c)
+            if c == quote:
+                quote = None
+            i += 1
+            continue
+        if c in '\'"':
+            quote = c
+            buf.append(c)
+            i += 1
+            continue
+        m = _SEGMENT_RE.match(cmd, i)
+        if m:
+            out.append(''.join(buf))
+            buf = []
+            i = m.end()
+            continue
+        buf.append(c)
+        i += 1
+    out.append(''.join(buf))
+    return [s.strip() for s in out if s.strip()]
 
 
 def _argv0(segment: str) -> str:
@@ -131,6 +163,12 @@ def _extract_code_file(cmd_tail: str) -> Optional[str]:
     """Return the last non-flag token if it has a code extension."""
     for tok in reversed(cmd_tail.split()):
         if not tok.startswith('-'):
+            # Strip quotes before testing the suffix. `cat 'foo.py'` tokenises
+            # to `'foo.py'`, whose suffix is `.py'` — matching no code
+            # extension — so a single quote character silently bypassed the
+            # bulk-read block entirely. Paths with spaces need quoting, so
+            # this was reachable by accident, not just deliberately.
+            tok = tok.strip('\'"')
             if Path(tok).suffix.lower() in _CODE_EXTS:
                 return tok
             return None
@@ -179,7 +217,7 @@ def warn_bulk_sed(cmd: str) -> Optional[str]:
     """Warning for large `sed -n A,Bp` reads of code files, or None."""
     for seg in segments(cmd):
         effective = _strip_rtk(seg)
-        m = re.match(r"""^sed\s+-n\s+['"]?(\d+),(\d+)p['"]?(.*)""", effective)
+        m = re.match(r"""^sed\s+-n\s+['"]?(\d+),(\d+)p(?:\s*;\s*\d*q)?['"]?(.*)""", effective)
         if not m:
             continue
         lines = int(m.group(2)) - int(m.group(1))
@@ -280,7 +318,7 @@ def graph_answer(graph_db: Path, redirect_type: str, symbol: str) -> Optional[st
                 locs = " · ".join(f"{f}:{a}-{b}" for f, a, b in rows)
                 return (
                     f"graph: {symbol} → {locs}. "
-                    f"Body: sed -n 'A,Bp' on that span."
+                    f"Body: sed -n 'A,Bp;Bq' on that span."
                 )
         elif redirect_type in ("callers", "tests", "callees"):
             # Only answer CALLERS for symbols this repo actually DEFINES. Library calls

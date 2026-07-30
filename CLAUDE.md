@@ -37,7 +37,7 @@ questions. Read it before changing direction.
 - v2.1.0's release notes are on `main`, but **no `v2.1.0` tag exists** — the
   only tag is `v2.0.0` at `e192fa6` (`git describe` reads
   `v2.0.0-55-g089d6b0`). PR #3 merged the post-v2 review pass at `089d6b0`,
-  subsuming PR #1 (`release/v2.1.0` was an ancestor of it). 338 tests pass.
+  subsuming PR #1 (`release/v2.1.0` was an ancestor of it). 354 tests pass.
   - **Fixed:** `cch-edit`/`cch-write` replaced symlinks and silently lost the
     edit (this repo installs its hooks *as* symlinks); the warning prefix in
     `intercept-bash` executed `$(...)` from a path token; `install.py` wiped

@@ -35,7 +35,7 @@ MULTIMODAL_EXTS = {
 }
 
 REASON_TEMPLATE = (
-    "BLOCKED: Use cairn-graph --location SYMBOL first, then sed -n 'A,Bp' {path}.\n"
+    "BLOCKED: Use cairn-graph --location SYMBOL first, then sed -n 'A,Bp;Bq' {path}.\n"
     "Edit: cch-edit.py {path} 'old' 'new'"
 )
 
