@@ -22,7 +22,6 @@ Two properties this needs and did not have:
 
 import json
 import os
-from datetime import datetime
 from pathlib import Path
 
 EVENTS_LOG = Path.home() / '.claude' / 'cache' / 'ccm' / 'events.jsonl'
@@ -34,6 +33,10 @@ def current_session() -> str:
 
 
 def log_event(event: str, **fields) -> None:
+    # Imported here, not at module scope: intercept-bash imports this module on
+    # every Bash call but only calls log_event when a guard actually fires, and
+    # datetime costs ~0.7ms to import.
+    from datetime import datetime
     try:
         EVENTS_LOG.parent.mkdir(parents=True, exist_ok=True)
         if not fields.get('sid'):

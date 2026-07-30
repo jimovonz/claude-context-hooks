@@ -15,14 +15,18 @@ Blocks are one-shot overridable: re-running the identical command clears the
 marker and lets it through, which is what the block message has always
 claimed ("rerun only if you need every text occurrence") and never did.
 """
-import hashlib
+# Annotations are never evaluated, so `Optional` costs nothing at runtime and
+# typing (~1.6ms) need not be imported at all. The three heavy imports that
+# remain are deferred to the functions that need them: this module is imported
+# by the PreToolUse:Bash hook on *every* Bash call, and the common path — a
+# command that trips no guard — touches none of them.
+from __future__ import annotations
+
 import os
 import re
 import shlex
-import sqlite3
 import time
 from pathlib import Path
-from typing import Optional
 
 # Commands that must never be re-wrapped or re-guarded: retrieval and the
 # wrapper itself (recursive stubbing), plus the batch runner (which applies
@@ -251,6 +255,10 @@ def graph_answer(graph_db: Path, redirect_type: str, symbol: str) -> Optional[st
     must NOT block the grep (the graph may be stale or the language's edge
     extraction thin).
     """
+    # Deferred: sqlite3 drags in datetime behind it, ~2.8ms that every Bash
+    # call was paying so that a symbol-shaped grep could be answered.
+    import sqlite3
+
     conn = None
     try:
         conn = sqlite3.connect(str(graph_db))
@@ -349,6 +357,10 @@ def check_symbol_grep(cmd: str, cwd: str = '') -> Optional[str]:
 # ---------------------------------------------------------------- one-shot pass
 
 def _override_marker(cmd: str) -> Path:
+    # Deferred: only reached after a guard has already fired, since block()
+    # calls consume_override solely on a non-None reason.
+    import hashlib
+
     digest = hashlib.blake2s(cmd.encode('utf-8', 'replace'),
                              digest_size=8).hexdigest()
     return _OVERRIDE_DIR / digest

@@ -34,9 +34,10 @@ questions. Read it before changing direction.
 
 ## Where we are right now
 
-- v2.1.0 tagged on `main` (v2.0.0 was `e192fa6`); the post-v2 review pass
-  (`feature/review-fixes-and-levers`, 2026-07-30) is merged on top. 317 tests
-  pass.
+- v2.1.0's release notes are on `main`, but **no `v2.1.0` tag exists** — the
+  only tag is `v2.0.0` at `e192fa6` (`git describe` reads
+  `v2.0.0-55-g089d6b0`). PR #3 merged the post-v2 review pass at `089d6b0`,
+  subsuming PR #1 (`release/v2.1.0` was an ancestor of it). 338 tests pass.
   - **Fixed:** `cch-edit`/`cch-write` replaced symlinks and silently lost the
     edit (this repo installs its hooks *as* symlinks); the warning prefix in
     `intercept-bash` executed `$(...)` from a path token; `install.py` wiped
@@ -89,6 +90,28 @@ on `origin`, not when CLAUDE.md says so.** Verify with
 tag is invisible to the other machine, which is how a header can claim a
 release nothing else can see). Push tags with the commits that earn them:
 `git push --follow-tags`.
+
+## Hot-path invariant: keep `lib/guards.py` cheap to import
+
+`PreToolUse:Bash` imports `lib.guards` (and `lib.event_log`) on **every** Bash
+call, so a module-scope import there is a tax on every command the model runs.
+Measured 2026-07-30: `import hashlib, sqlite3` + `from typing import Optional`
+cost 6.4ms per call, ~5ms of which the common path never needed — `sqlite3`
+(plus the `datetime` it drags in) is only reached by `graph_answer`, `hashlib`
+only by `_override_marker`, which `block()` calls solely once a guard has
+already fired. All three are now deferred to their call sites, and annotations
+are strings via `from __future__ import annotations` so `typing` is not
+imported at all.
+
+Rule: a new import in `guards.py` or `event_log.py` goes at module scope only
+if the no-guard-fires path actually uses it. Verify with
+`python3 -X importtime hooks/intercept-bash.py < /dev/null`, and A/B against
+`git show HEAD:<file>` in one interleaved run — the bare-interpreter baseline
+drifts by several ms between runs, so sequential before/after timings lie.
+
+`python3 -S` was measured and **rejected**: `ccm_cache` imports `zstandard`
+under `try/except ImportError` with a gzip fallback, so skipping site-packages
+would silently degrade compression rather than fail loudly.
 
 ## Architecture in one breath
 
