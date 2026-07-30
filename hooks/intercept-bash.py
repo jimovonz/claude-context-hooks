@@ -57,11 +57,22 @@ def should_skip_wrap(cmd: str) -> bool:
 
 # Matched on the command word so a path or a quoted mention cannot trip it.
 _BATCH_RE = re.compile(r'(?:^|[|&;]|\s)(?:\S*/)?cch-batch(?:\.py)?\b')
+_NO_GUARDS_RE = re.compile(r'(?<![-\w])--no-guards\b')
 
 
 def _is_batch(cmd: str) -> bool:
-    """Does this command invoke cch-batch (which guards its own lines)?"""
-    return _BATCH_RE.search(cmd) is not None
+    """Does this command invoke cch-batch AND will cch-batch guard its lines?
+
+    Delegation is only sound while the delegate actually enforces. `--no-guards`
+    turns cch-batch's per-line checks off, so delegating to it would leave the
+    routing policy unenforced at BOTH layers — a bypass that did not exist
+    before delegation was introduced. With the flag present we keep guarding
+    here, which is coarser (the whole heredoc is one string, so one guarded
+    line blocks the call) but never silent.
+    """
+    if not _BATCH_RE.search(cmd):
+        return False
+    return not _NO_GUARDS_RE.search(cmd)
 
 
 def _deny(reason: str) -> int:

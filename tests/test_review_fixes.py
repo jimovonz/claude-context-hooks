@@ -660,3 +660,19 @@ def test_batch_invocations_delegate_guards_to_their_own_lines():
     assert ib._is_batch(batch) is True
     assert ib._is_batch('git status -sb') is False
     assert ib._is_batch('rg -n foo src/ | cch-batch.py') is True
+
+
+def test_no_guards_batch_is_not_delegated():
+    """Delegation is sound only while the delegate enforces.
+
+    cch-batch --no-guards turns its per-line checks off, so delegating to it
+    would leave the routing policy unenforced at both layers.
+    """
+    import importlib.util
+    from pathlib import Path
+    spec = importlib.util.spec_from_file_location(
+        'ib', Path(__file__).resolve().parent.parent / 'hooks' / 'intercept-bash.py')
+    ib = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(ib)
+    assert ib._is_batch("cch-batch.py << 'EOF'\ncat src/x.py\nEOF") is True
+    assert ib._is_batch("cch-batch.py --no-guards << 'EOF'\ncat src/x.py\nEOF") is False
