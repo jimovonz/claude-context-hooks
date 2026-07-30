@@ -128,6 +128,45 @@ def segments(cmd: str) -> list[str]:
     return [s.strip() for s in out if s.strip()]
 
 
+def _pipe_stages(cmd: str) -> list[str]:
+    """Stages of a pipeline, split on unquoted `|` only (not `||`).
+
+    segments() splits on every shell operator, which loses the distinction
+    between `pytest; tail f` and `pytest | tail`. Only the second discards the
+    exit status, so the pipe guard needs pipeline structure specifically.
+    """
+    out: list[str] = []
+    buf: list[str] = []
+    quote = None
+    i = 0
+    while i < len(cmd):
+        c = cmd[i]
+        if quote is not None:
+            buf.append(c)
+            if c == quote:
+                quote = None
+            i += 1
+            continue
+        if c in '\'"':
+            quote = c
+            buf.append(c)
+            i += 1
+            continue
+        if c == '|':
+            if i + 1 < len(cmd) and cmd[i + 1] == '|':   # `||` is not a pipe
+                buf.append(cmd[i:i + 2])
+                i += 2
+                continue
+            out.append(''.join(buf))
+            buf = []
+            i += 1
+            continue
+        buf.append(c)
+        i += 1
+    out.append(''.join(buf))
+    return [s.strip() for s in out if s.strip()]
+
+
 def _argv0(segment: str) -> str:
     """Basename of a segment's command word, ignoring VAR=val prefixes."""
     try:
@@ -195,6 +234,50 @@ def _bulk_read_segment(segment: str) -> Optional[str]:
         if _extract_code_file(rest):
             return _BULK_READ_REDIRECT
         return None
+    return None
+
+
+_INTERPRETER_READ = (
+    "Reading a whole code file through an interpreter is the same bulk read the "
+    "guard blocks for cat/head — it just spells it differently. Use "
+    "`cairn-graph --location SYMBOL` then `sed -n 'A,Bp'` for the span you need."
+)
+
+_PY_READ_RE = re.compile(r'open\s*\([^)]*\)\s*\.\s*read\s*\(')
+# The path sits INSIDE open('...'), so the bare-token extractor never sees it.
+_QUOTED_CODE_FILE_RE = re.compile(
+    r'''['"]([\w./-]+\.(?:py|js|ts|tsx|go|rs|c|cc|cpp|h|hpp|java|rb|sh))['"]''')
+
+
+def check_interpreter_bulk_read(cmd: str) -> Optional[str]:
+    """Block whole-file reads dressed up as an interpreter one-liner.
+
+    `python3 -c "print(open('f.py').read())"` and `perl -ne 'print' f.py` load an
+    entire file into context exactly as `cat` does. They were found by probing
+    the guard with rewrites of a blocked command — the evasions were not
+    hypothetical, they were the next thing to hand.
+
+    Deliberately omits awk: recognising "an awk program that happens to print
+    most lines" is a judgement call, and a guard that misfires trains people to
+    override it reflexively.
+    """
+    for seg in segments(cmd):
+        try:
+            toks = shlex.split(_strip_rtk(seg))
+        except ValueError:
+            continue
+        if not toks:
+            continue
+        argv0 = os.path.basename(toks[0])
+        if argv0.startswith('python') and '-c' in toks:
+            body = ' '.join(toks[toks.index('-c') + 1:])
+            if _PY_READ_RE.search(body) and _QUOTED_CODE_FILE_RE.search(body):
+                return _INTERPRETER_READ
+        if argv0 == 'perl':
+            joined = ' '.join(toks)
+            if ('-ne' in toks or '-pe' in toks) and _extract_code_file(joined):
+                if "print" in joined:
+                    return _INTERPRETER_READ
     return None
 
 
@@ -414,6 +497,31 @@ def _prune_overrides() -> None:
         pass
 
 
+_OVERRIDE_LOG = Path.home() / '.claude' / 'cache' / 'cch' / 'overrides.jsonl'
+
+
+def record_override(cmd: str, reason: str) -> None:
+    """Append an audited record of a guard being bypassed.
+
+    The marker files are named by digest and hold nothing, so a bypass was
+    countable but not attributable: you could see that six happened and never
+    learn which guard was circumvented or what ran instead. A guard nobody can
+    audit is a suggestion. Fail-soft — auditing must never break the command.
+    """
+    try:
+        import json as _json
+        _OVERRIDE_LOG.parent.mkdir(parents=True, exist_ok=True)
+        rec = {
+            'ts': time.strftime('%Y-%m-%d %H:%M:%S'),
+            'guard': (reason or '').split('.')[0][:80],
+            'cmd': cmd[:400],
+        }
+        with open(_OVERRIDE_LOG, 'a', encoding='utf-8') as fh:
+            fh.write(_json.dumps(rec) + '\n')
+    except Exception:
+        pass
+
+
 def consume_override(cmd: str) -> bool:
     """True when this exact command was blocked before — and clears the mark.
 
@@ -452,12 +560,30 @@ def check_pytest_exit_masked(cmd: str) -> Optional[str]:
 
     `pytest ... | tail -2` is the natural way to keep output short, and it is
     exactly why the failure is easy to miss: the summary line scrolls past while
-    the shell reports 0. `set -o pipefail` restores the real status, so the
-    guard asks for that rather than banning the pipe.
+    the shell reports 0. `set -o pipefail` restores the real status, so the guard
+    asks for that rather than banning the pipe.
+
+    Stage-based, not a regex over the raw text. The first version pattern-matched
+    the command string and so fired on any script that merely QUOTED such a
+    pipeline — it blocked a probe whose only crime was containing the example as
+    data. Every other guard here tokenises for exactly this reason.
     """
     if 'pipefail' in cmd:
         return None
-    return _PYTEST_EXIT_MASKED if _PYTEST_PIPE_RE.search(cmd) else None
+    stages = _pipe_stages(cmd)
+    pytest_at = None
+    for i, stage in enumerate(stages):
+        toks = stage.split()
+        if not toks:
+            continue
+        argv0 = os.path.basename(_argv0(stage) or '')
+        is_pytest = argv0 == 'pytest' or (
+            argv0.startswith('python') and '-m' in toks and 'pytest' in toks)
+        if is_pytest and pytest_at is None:
+            pytest_at = i
+        elif pytest_at is not None and argv0 in ('head', 'tail'):
+            return _PYTEST_EXIT_MASKED
+    return None
 
 
 _SELF_REPLACE = (
@@ -494,9 +620,11 @@ def block(cmd: str, cwd: str = '') -> Optional[str]:
     guessing at what would satisfy the guard.
     """
     reason = (check_bulk_read(cmd) or check_symbol_grep(cmd, cwd)
-              or check_pytest_exit_masked(cmd) or check_self_referential_replace(cmd))
+              or check_pytest_exit_masked(cmd) or check_self_referential_replace(cmd)
+              or check_interpreter_bulk_read(cmd))
     if not reason:
         return None
     if consume_override(cmd):
+        record_override(cmd, reason)
         return None
     return reason + _OVERRIDE_HINT

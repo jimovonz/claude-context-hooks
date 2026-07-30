@@ -59,3 +59,52 @@ def test_without_all_flag_it_is_allowed():
 
 def test_other_commands_are_untouched():
     assert check_self_referential_replace("rg --all 'a' 'ab'") is None
+
+
+# --- bulk reads dressed up as interpreter one-liners ---
+
+def test_python_read_oneliner_is_blocked():
+    """Found by probing the guard with rewrites of a blocked command — the
+    evasion was not hypothetical, it was the next thing to hand."""
+    from hooks.lib.guards import check_interpreter_bulk_read
+    assert check_interpreter_bulk_read('python3 -c "print(open(\'q.py\').read())"')
+
+
+def test_perl_slurp_is_blocked():
+    from hooks.lib.guards import check_interpreter_bulk_read
+    assert check_interpreter_bulk_read("perl -ne 'print' cairn/query.py")
+
+
+def test_python_without_read_is_allowed():
+    from hooks.lib.guards import check_interpreter_bulk_read
+    assert check_interpreter_bulk_read('python3 -c "print(1+1)"') is None
+
+
+def test_awk_is_deliberately_not_blocked():
+    """Recognising an awk program that happens to print most lines is a
+    judgement call, and a guard that misfires trains reflexive overriding."""
+    from hooks.lib.guards import check_interpreter_bulk_read
+    assert check_interpreter_bulk_read("awk 'NR<600' cairn/query.py") is None
+
+
+# --- circumvention is auditable ---
+
+def test_override_is_recorded_with_guard_and_command(tmp_path, monkeypatch):
+    """A bypass was countable but not attributable: digest-named marker files
+    held nothing, so you could see six happened and never learn which guard."""
+    import json
+    from hooks.lib import guards
+    log = tmp_path / "overrides.jsonl"
+    monkeypatch.setattr(guards, "_OVERRIDE_LOG", log)
+    guards.record_override("cat big_file.py", "Bulk read blocked. Use sed.")
+    rec = json.loads(log.read_text().strip())
+    assert rec["cmd"] == "cat big_file.py"
+    assert "Bulk read blocked" in rec["guard"]
+    assert rec["ts"]
+
+
+def test_audit_never_breaks_the_command(monkeypatch):
+    """Fail-soft: auditing a bypass must not become a way to fail a command."""
+    from hooks.lib import guards
+    monkeypatch.setattr(guards, "_OVERRIDE_LOG", None)
+    guards.record_override("cat f.py", "reason")   # must not raise
