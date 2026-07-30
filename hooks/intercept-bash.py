@@ -13,271 +13,79 @@ We then rewrite once more to wrap the (possibly rtk-rewritten) command
 in cache-wrap.py, which executes it and decides inline-vs-cache after
 seeing real output size.
 
-Exemptions (passed through unchanged):
-- ccm-get.py invocations (already a cache retrieval)
-- cache-wrap.py invocations (already wrapped — no double-wrap)
-- Empty commands
+Exemptions (passed through unchanged): commands whose COMMAND WORD is one
+of ours — ccm-get.py (already a retrieval), cache-wrap.py (already
+wrapped), cch-batch.py (applies the same guards to each of its lines).
+Merely mentioning one of those names no longer exempts a command.
+
+All guard logic lives in lib/guards.py so cch-batch enforces exactly the
+same rules; see that module for why.
 
 The wrapper itself executes via `bash -c`, so all shell features work.
 """
-
 import json
 import os
-import re
 import shlex
-import shutil
-import sqlite3
+import re
 import sys
-import tempfile
 from pathlib import Path
 
-from lib.event_log import log_event
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+try:
+    from lib import guards
+except Exception:                       # no guards -> pass through unwrapped
+    guards = None
+try:
+    from lib.event_log import log_event
+except Exception:                       # logging must never break a hook
+    def log_event(*_args, **_kwargs):
+        return None
 
 WRAPPER_PATH = Path.home() / '.claude' / 'hooks' / 'cache-wrap.py'
 
-PASSTHROUGH_MARKERS = (
-    'cache-wrap.py',
-    'ccm-get.py',
-    'cch-batch.py',
-)
-
-_CODE_EXTS = frozenset({
-    '.py', '.js', '.ts', '.tsx', '.jsx', '.rs', '.go',
-    '.java', '.rb', '.c', '.cpp', '.h', '.hpp', '.cs',
-    '.ex', '.exs',
-})
-
-_BULK_THRESHOLD = 50
-
-_BULK_WARN_THRESHOLD = 100
-
-_BULK_WARN_PREFIX = "[cch: reading {lines} lines from {path} — consider cairn-graph --location SYMBOL for targeted reads]"
-
-_BULK_READ_REDIRECT = (
-    "BLOCKED: Run cairn-graph --location SYMBOL first, then sed -n 'A,Bp' on the result."
-)
-
-
-# Definition keywords across languages
-_DEF_KEYWORDS = (
-    r"def|class|function|fn|func|type|interface|struct|enum|trait|impl|module"
-)
-
-# Pattern categories: (compiled_regex, redirect_type)
-_PATTERNS = [
-    # 1. Symbol definition: grep 'def foo' / grep "class Bar" / etc.
-    (re.compile(
-        rf"""(?:grep|rg)\b.*(?:'|")(?:{_DEF_KEYWORDS})\s+(\w+)(?:'|")"""
-    ), "location"),
-    # 2. Caller search: grep 'foo(' or grep '\.foo('
-    (re.compile(
-        r"""(?:grep|rg)\b.*(?:'|")\\?\.?(\w{2,})\((?:'|")"""
-    ), "callers"),
-    # 3. Test discovery: grep 'test_foo' / rg test_foo (quoted or unquoted argv)
-    (re.compile(
-        r"""(?:grep|rg)\b.*?(?:['"]|\s)(?:def\s+)?(test_\w+)(?:['"]|\s|$)"""
-    ), "tests"),
-    # 4. Import tracing: grep 'from foo import' or grep 'import foo'
-    (re.compile(
-        r"""(?:grep|rg)\b.*(?:'|")(?:from\s+(\w+)\s+import|import\s+(\w+))(?:'|")"""
-    ), "callees"),
-]
-
-_SESSION_MARKER = Path(tempfile.gettempdir()) / f"cch-graph-redirected-{os.getppid()}"
-
-_REDIRECT_TEMPLATES = {
-    "location": "BLOCKED: Use cairn-graph --location {symbol} instead of grep.",
-    "callers": "BLOCKED: Use cairn-graph --callers {symbol} instead of grep.",
-    "tests": "BLOCKED: Use cairn-graph --tests {symbol} instead of grep.",
-    "callees": "BLOCKED: Use cairn-graph --callees {symbol} instead of grep.",
-}
-
-
-def _extract_code_file(cmd_tail: str) -> str | None:
-    """Return the last non-flag token if it has a code extension."""
-    for tok in reversed(cmd_tail.split()):
-        if not tok.startswith('-'):
-            if Path(tok).suffix.lower() in _CODE_EXTS:
-                return tok
-            return None
-    return None
-
-
-def _check_bulk_read(cmd: str) -> str | None:
-    """Detect bulk reads of code files. Returns redirect message or None.
-
-    Unconditional — no session marker. cat/head/tail/sed of an entire
-    code file is never optimal; sed -n with a narrow range always works.
-    """
-    first_segment = cmd.split('|')[0] if '|' in cmd else cmd
-    effective = re.sub(r'^rtk\s+', '', first_segment.strip())
-
-    # cat <code-file> — always a full dump
-    if re.match(r'^cat\b', effective):
-        if _extract_code_file(effective[3:]):
-            return _BULK_READ_REDIRECT
-        return None
-
-    # head/tail with large -n
-    m = re.match(r'^(head|tail)\b(.*)', effective)
-    if m:
-        rest = m.group(2)
-        n_match = re.search(r'-n\s*(\d+)|-(\d+)', rest)
-        if not n_match:
-            return None  # no -n = default 10, fine
-        n = int(n_match.group(1) or n_match.group(2))
-        if n < _BULK_THRESHOLD:
-            return None
-        if _extract_code_file(rest):
-            return _BULK_READ_REDIRECT
-        return None
-
-    return None
-
-
-def _warn_bulk_sed(cmd: str) -> str | None:
-    """Return a warning prefix for large sed -n reads on code files, or None."""
-    effective = re.sub(r'^rtk\s+', '', cmd.strip())
-    m = re.match(r"""^sed\s+-n\s+['"]?(\d+),(\d+)p['"]?(.*)""", effective)
-    if not m:
-        return None
-    a, b = int(m.group(1)), int(m.group(2))
-    lines = b - a
-    if lines < _BULK_WARN_THRESHOLD:
-        return None
-    path = _extract_code_file(m.group(3))
-    if not path:
-        return None
-    return _BULK_WARN_PREFIX.format(lines=lines, path=path)
-
-
-# rg -r / --replace footgun: in ripgrep, -r is --replace (it rewrites every
-# match in the printed output), NOT --recursive (rg already recurses by
-# default). A user carrying grep's -r=recursive habit will silently rewrite
-# matches to the REPLACEMENT text and misread the result. Warn (non-blocking).
-_RG_REPLACE_WARN = (
-    "[cch: rg -r / --replace REWRITES every match in the output "
-    "(ripgrep -r is --replace, NOT recursive; rg recurses by default). "
-    "If you meant recursive, drop -r.]"
-)
-
-
-def _warn_rg_replace(cmd: str) -> str | None:
-    """Return a warning prefix when rg is invoked with -r/--replace, else None."""
-    effective = re.sub(r'^rtk\s+', '', cmd.strip())
-    head = re.split(r'[|;&]', effective, 1)[0]
-    try:
-        toks = shlex.split(head)
-    except ValueError:
-        return None
-    if not toks or os.path.basename(toks[0]) != 'rg':
-        return None
-    for tok in toks[1:]:
-        if tok == '--':
-            break
-        if tok == '--replace' or tok.startswith('--replace='):
-            return _RG_REPLACE_WARN
-        # short-flag cluster containing r (e.g. -r, -rn); -r consumes an arg
-        if tok.startswith('-') and not tok.startswith('--') and 'r' in tok[1:]:
-            return _RG_REPLACE_WARN
-    return None
-
-
-def _graph_db_for(cwd: str) -> Path | None:
-    """Walk up from cwd to find .code-review-graph/graph.db."""
-    d = Path(cwd or '.').resolve()
-    while True:
-        candidate = d / '.code-review-graph' / 'graph.db'
-        if candidate.is_file():
-            return candidate
-        if d.parent == d:
-            return None
-        d = d.parent
-
-
-def _graph_answer(graph_db: Path, redirect_type: str, symbol: str) -> str | None:
-    """Answer a symbol query straight from graph.db, or None if unresolvable.
-
-    Only returns a string when the graph genuinely has the answer — a miss
-    must NOT block the grep (the graph may be stale or the language's edge
-    extraction thin, e.g. Kotlin call edges).
-    """
-    try:
-        conn = sqlite3.connect(str(graph_db))
-        conn.execute("PRAGMA busy_timeout=500")
-        if redirect_type == "location":
-            rows = conn.execute(
-                "SELECT file_path, line_start, line_end FROM nodes "
-                "WHERE name = ? AND kind IN ('Function', 'Class', 'Type') "
-                "ORDER BY line_start LIMIT 3",
-                (symbol,),
-            ).fetchall()
-            if rows:
-                locs = " · ".join(f"{f}:{a}-{b}" for f, a, b in rows)
-                return (
-                    f"graph: {symbol} → {locs}. "
-                    f"Body: sed -n 'A,Bp' on that span. "
-                    f"(grep skipped — rerun only if you need every text occurrence)"
-                )
-        elif redirect_type in ("callers", "tests", "callees"):
-            edge_kind = {"callers": "CALLS", "tests": "TESTED_BY",
-                         "callees": "CALLS"}[redirect_type]
-            col, other = (("target_qualified", "source_qualified")
-                          if redirect_type != "callees"
-                          else ("source_qualified", "target_qualified"))
-            rows = conn.execute(
-                f"SELECT DISTINCT {other} FROM edges "
-                f"WHERE kind = ? AND ({col} LIKE ? OR {col} = ? "
-                f"OR {col} LIKE ?) LIMIT 6",
-                (edge_kind, f"%::{symbol}", symbol, f"%.{symbol}"),
-            ).fetchall()
-            if rows:
-                names = " · ".join(r[0].rsplit("::", 1)[-1] for r in rows)
-                return (
-                    f"graph: {symbol} {redirect_type}: {names} "
-                    f"(cairn-graph --{redirect_type} {symbol} for locations; "
-                    f"grep skipped)"
-                )
-        return None
-    except sqlite3.Error:
-        return None
-    finally:
-        try:
-            conn.close()
-        except Exception:
-            pass
-
-
-def _check_symbol_grep(cmd: str, cwd: str = '') -> str | None:
-    """Detect grep-for-symbol patterns and answer them from the graph.
-
-    Resolves the symbol at hook time: a hit blocks the grep WITH the answer
-    (no redirect round-trip); a graph miss passes the grep through silently
-    (never redirect to a graph that cannot answer).
-    """
-    for pattern, redirect_type in _PATTERNS:
-        m = pattern.search(cmd)
-        if not m:
-            continue
-        symbol = next(g for g in m.groups() if g is not None)
-        graph_db = _graph_db_for(cwd)
-        if graph_db is None:
-            return None
-        answer = _graph_answer(graph_db, redirect_type, symbol)
-        if answer:
-            return f"BLOCKED: {answer}"
-        return None
-
-    return None
+# Re-exported for callers/tests that referenced these on this module.
+PASSTHROUGH_MARKERS = (guards.PASSTHROUGH_MARKERS if guards is not None
+                       else ('cache-wrap.py', 'ccm-get.py', 'cch-batch.py'))
 
 
 def should_skip_wrap(cmd: str) -> bool:
-    if not cmd or not cmd.strip():
+    if guards is None:
         return True
-    for marker in PASSTHROUGH_MARKERS:
-        if marker in cmd:
-            return True
-    return False
+    return guards.is_passthrough(cmd)
+
+
+# Matched on the command word so a path or a quoted mention cannot trip it.
+_BATCH_RE = re.compile(r'(?:^|[|&;]|\s)(?:\S*/)?cch-batch(?:\.py)?\b')
+_NO_GUARDS_RE = re.compile(r'(?<![-\w])--no-guards\b')
+
+
+def _is_batch(cmd: str) -> bool:
+    """Does this command invoke cch-batch AND will cch-batch guard its lines?
+
+    Delegation is only sound while the delegate actually enforces. `--no-guards`
+    turns cch-batch's per-line checks off, so delegating to it would leave the
+    routing policy unenforced at BOTH layers — a bypass that did not exist
+    before delegation was introduced. With the flag present we keep guarding
+    here, which is coarser (the whole heredoc is one string, so one guarded
+    line blocks the call) but never silent.
+    """
+    if not _BATCH_RE.search(cmd):
+        return False
+    return not _NO_GUARDS_RE.search(cmd)
+
+
+def _deny(reason: str) -> int:
+    response = {
+        'hookSpecificOutput': {
+            'hookEventName': 'PreToolUse',
+            'permissionDecision': 'deny',
+            'permissionDecisionReason': reason,
+        }
+    }
+    json.dump(response, sys.stdout)
+    sys.stdout.write('\n')
+    return 0
 
 
 def main() -> int:
@@ -293,56 +101,37 @@ def main() -> int:
 
     tool_input = data.get('tool_input') or {}
     cmd = tool_input.get('command', '')
+    sid = str(data.get('session_id') or '')[:36]
+    cwd = data.get('cwd') or os.getcwd()
 
     if should_skip_wrap(cmd):
         sys.stdout.write('{}\n')
         return 0
 
-    # Detect bulk code-file reads (unconditional — no session marker)
-    redirect = _check_bulk_read(cmd)
-    if redirect:
-        response = {
-            'hookSpecificOutput': {
-                'hookEventName': 'PreToolUse',
-                'permissionDecision': 'deny',
-                'permissionDecisionReason': redirect,
-            }
-        }
-        json.dump(response, sys.stdout)
-        sys.stdout.write('\n')
-        return 0
+    # A cch-batch invocation carries every batched command inside its heredoc,
+    # so guarding the command STRING here evaluates all of them as one; a
+    # single guarded line then denies the whole call and the other lines never
+    # run. cch-batch already applies these exact guards per line (blocking one
+    # line, reporting it in that line's slot, leaving the rest to run), so the
+    # correct division is to delegate. Not a bypass: the same guards.block runs
+    # on each line, which is what cch-batch's own docstring promises.
+    if not _is_batch(cmd):
+        # Blocking guards (bulk code-file read, symbol-grep answerable from the
+        # graph). A repeat of the identical command overrides once.
+        reason = guards.block(cmd, cwd)
+        if reason:
+            log_event('deny_bash_guard', sid=sid, cmd_head=cmd[:120],
+                      kind='graph' if 'graph:' in reason else 'bulk_read')
+            return _deny(reason)
 
-    # Soft-warn on large sed -n reads (non-blocking — prepends warning to output)
-    warn_msg = _warn_bulk_sed(cmd)
-    if warn_msg:
-        log_event('warn_bulk_sed', cmd_head=cmd[:120])
-        cmd = f'echo "{warn_msg}"; {cmd}'
+        # Non-blocking warnings, prepended safely (never via an unquoted echo).
+        cmd, applied = guards.apply_warnings(cmd)
+        for w in applied:
+            event = ('warn_rg_replace' if 'rg -r' in w else 'warn_bulk_sed')
+            log_event(event, sid=sid, cmd_head=cmd[:120])
 
-    # Soft-warn on the rg -r/--replace footgun (non-blocking — prepends warning)
-    warn_rg = _warn_rg_replace(cmd)
-    if warn_rg:
-        log_event('warn_rg_replace', cmd_head=cmd[:120])
-        cmd = f'echo "{warn_rg}"; {cmd}'
-
-    # Symbol-lookup-via-grep: answer from the graph at hook time (block with
-    # the answer); pass through silently when the graph cannot resolve it
-    redirect = _check_symbol_grep(cmd, data.get('cwd') or os.getcwd())
-    if redirect:
-        response = {
-            'hookSpecificOutput': {
-                'hookEventName': 'PreToolUse',
-                'permissionDecision': 'deny',
-                'permissionDecisionReason': redirect,
-            }
-        }
-        json.dump(response, sys.stdout)
-        sys.stdout.write('\n')
-        return 0
-
-    sid = str(data.get('session_id') or '')[:36]
     env_prefix = f'CCH_SESSION_ID={shlex.quote(sid)} ' if sid else ''
     wrapped = f'{env_prefix}{WRAPPER_PATH} -- {shlex.quote(cmd)}'
-
     response = {
         'hookSpecificOutput': {
             'hookEventName': 'PreToolUse',
@@ -358,4 +147,12 @@ def main() -> int:
 
 
 if __name__ == '__main__':
-    sys.exit(main())
+    # This hook gates EVERY Bash call. Any unhandled failure must allow the
+    # command through unwrapped, never break the session.
+    try:
+        sys.exit(main())
+    except SystemExit:
+        raise
+    except BaseException:
+        sys.stdout.write('{}\n')
+        sys.exit(0)

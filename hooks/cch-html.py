@@ -25,10 +25,12 @@ Usage:
 """
 import argparse
 import json
+import os
 import re
 import shutil
 import subprocess
 import sys
+import urllib.parse
 import urllib.request
 from html import unescape
 from html.parser import HTMLParser
@@ -41,15 +43,25 @@ BLOCK_TAGS = {'p', 'div', 'section', 'article', 'main', 'header', 'footer', 'nav
 UA = 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0 Safari/537.36'
 CHROME_BINS = ('google-chrome', 'google-chrome-stable', 'chromium', 'chromium-browser')
 
+# Hard caps. An unchecked --url makes a read tool into a local-file read
+# primitive (urllib honours file:// and ftp://), an uncapped read() pulls a
+# whole response into memory, and unbounded nesting recursed the renderer
+# into a RecursionError.
+ALLOWED_SCHEMES = ('http', 'https')
+MAX_FETCH_BYTES = int(os.environ.get('CCH_HTML_MAX_BYTES', str(8 * 1024 * 1024)))
+MAX_DEPTH = int(os.environ.get('CCH_HTML_MAX_DEPTH', '200'))
+NO_MATCH_PREFIX = '[cch-html: no match for selector'
+
 
 class Node:
-    __slots__ = ('tag', 'attrs', 'children', 'parent')
+    __slots__ = ('tag', 'attrs', 'children', 'parent', 'depth')
 
     def __init__(self, tag, attrs=None, parent=None):
         self.tag = tag
         self.attrs = dict(attrs or {})
         self.children = []  # Node or str
         self.parent = parent
+        self.depth = 0 if parent is None else parent.depth + 1
 
 
 class TreeBuilder(HTMLParser):
@@ -64,7 +76,10 @@ class TreeBuilder(HTMLParser):
             self.script_count += 1
         node = Node(tag, attrs, self.cur)
         self.cur.children.append(node)
-        if tag not in VOID_TAGS:
+        # Stop descending past MAX_DEPTH: the tree walkers (render_text.emit,
+        # select.descendants) recurse per level, so hostile or generated
+        # markup could blow the Python stack.
+        if tag not in VOID_TAGS and node.depth < MAX_DEPTH:
             self.cur = node
 
     def handle_startendtag(self, tag, attrs):
@@ -218,10 +233,15 @@ def chrome_dump(url: str, budget_ms: int = 8000) -> str | None:
     binpath = next((shutil.which(b) for b in CHROME_BINS if shutil.which(b)), None)
     if not binpath:
         return None
+    argv = [binpath, '--headless=new', '--disable-gpu',
+            f'--virtual-time-budget={budget_ms}', '--dump-dom', url]
+    if os.environ.get('CCH_HTML_NO_SANDBOX') == '1':
+        # Opt-in only: needed as root or in a container, but it drops
+        # Chrome's sandbox while rendering an arbitrary remote page.
+        argv.insert(1, '--no-sandbox')
     try:
         p = subprocess.run(
-            [binpath, '--headless=new', '--no-sandbox', '--disable-gpu',
-             f'--virtual-time-budget={budget_ms}', '--dump-dom', url],
+            argv,
             stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, timeout=45,
         )
         return p.stdout.decode('utf-8', 'replace') if p.stdout else None
@@ -230,9 +250,25 @@ def chrome_dump(url: str, budget_ms: int = 8000) -> str | None:
 
 
 def fetch(url: str) -> str:
+    """Fetch over http(s) only, with a hard byte cap.
+
+    urllib honours file:// and ftp://, so an unchecked --url turns this read
+    tool into a local-file read primitive.
+    """
+    scheme = urllib.parse.urlparse(url).scheme.lower()
+    if scheme not in ALLOWED_SCHEMES:
+        raise ValueError(
+            f'cch-html: refusing URL scheme {scheme or chr(40) + chr(41)!r}; '
+            f'only {", ".join(ALLOWED_SCHEMES)} are fetched')
     req = urllib.request.Request(url, headers={'User-Agent': UA})
     with urllib.request.urlopen(req, timeout=30) as r:
-        return r.read().decode(r.headers.get_content_charset() or 'utf-8', 'replace')
+        raw = r.read(MAX_FETCH_BYTES + 1)
+        charset = r.headers.get_content_charset() or 'utf-8'
+    truncated = len(raw) > MAX_FETCH_BYTES
+    text = raw[:MAX_FETCH_BYTES].decode(charset, 'replace')
+    if truncated:
+        text += '\n<!-- cch-html: truncated at CCH_HTML_MAX_BYTES -->'
+    return text
 
 
 def convert(html: str, selector: str | None, links: bool) -> tuple[str, int, bool]:
@@ -240,7 +276,7 @@ def convert(html: str, selector: str | None, links: bool) -> tuple[str, int, boo
     if selector:
         nodes = select(root, selector)
         if not nodes:
-            return f'[cch-html: no match for selector "{selector}"]\n', scripts, False
+            return f'{NO_MATCH_PREFIX} "{selector}"]\n', scripts, False
         text = '\n'.join(render_text(n, links) for n in nodes)
     else:
         text = render_text(root, links)
@@ -285,6 +321,9 @@ def main() -> int:
         if not a.quiet:
             note = ' — still looks like a JS shell' if shell else ''
             print(f'[cch-html: {via} {len(html)//1024}kB html → {len(text)//1024}kB text{note}]')
+        if text.startswith(NO_MATCH_PREFIX):
+            sys.stderr.write(text)
+            return 2
         sys.stdout.write(text)
         return 0
 
@@ -293,6 +332,9 @@ def main() -> int:
     if not a.quiet:
         note = f' — looks JS-rendered ({scripts} scripts, {len(text.strip())} chars text); retry with --url URL for the render ladder' if shell else ''
         print(f'[cch-html: {len(html)//1024}kB html → {len(text)//1024}kB text{note}]')
+    if text.startswith(NO_MATCH_PREFIX):
+        sys.stderr.write(text)
+        return 2
     sys.stdout.write(text)
     return 0
 

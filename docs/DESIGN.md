@@ -17,6 +17,15 @@ deny-with-reason channel. That had two distinct problems:
 
 1. The deny channel was abused as a successful-result channel (UX noise,
    poor composition with Cairn's hooks).
+
+   *Amended 2026-07:* the rule as written was already being broken in one
+   place on purpose. `guards.check_symbol_grep` resolves a symbol against
+   graph.db at hook time and denies the grep **carrying the answer**, which
+   saves the round-trip a bare redirect would cost. That is fine and the
+   rule should say so: a deny may carry a **bounded answer** (a location, a
+   caller list — content that is small and complete in itself); it must
+   never carry a **payload** (file contents, command output, anything whose
+   size depends on the data). Payloads go through `tool_result`.
 2. Caching was applied as a per-tool concern across Bash, Read, Grep,
    Glob, and WebFetch — five intercept paths, five cache code paths,
    five sets of edge cases.
@@ -128,6 +137,26 @@ These mechanisms are independent. Built-ins could be blocked without
 caching; Bash could be cached without blocking built-ins. We do both
 because together they ensure all data interaction is routed through one
 compress-and-cache pipeline.
+
+**Guards live in `lib/guards.py`, not in the hook.** `cch-batch` is a
+PASSTHROUGH_MARKER, so the PreToolUse hook skips an entire batch — while
+the batch was applying no guards of its own, the documented power-tool was
+also a complete bypass of the routing rules. Both entry points now call the
+same `guards.block()` / `guards.apply_warnings()`. Blocks are one-shot
+overridable (re-run the identical command), which is what the block message
+always claimed and never did.
+
+**Emission is deduplicated per session** (`lib/delta.py`). The cache is
+content-addressed, so identical output already deduped on disk while still
+being re-emitted in full every time. A repeat of a command whose output has
+not changed now collapses to a one-line `[CCM_UNCHANGED]` header; a changed
+one may emit a unified diff against the previous emission. Both name a
+retrievable key, so nothing becomes unreachable.
+
+**Full content is a budget, not a promise** (`lib/budget.py`). Uncached
+passthrough and `ccm-get --grep "."` draw on one finite, flock-serialized,
+visibly-depleting pool. The previous `--reason` gate was honor-system: a
+20-character string satisfies it and it never says no.
 
 ## Why blocking built-in tools (rather than letting them through)
 
@@ -332,6 +361,25 @@ cache threshold — conversion runs BEFORE the threshold check, so a
 converted page often returns inline with no stub round-trip. Local file
 reads are NEVER converted (a converted view would poison literal-match
 editing).
+
+### `ssh-tool.py`
+
+Remote work is the one place where the single-data-path argument cuts the
+other way. A one-off `ssh user@host cmd` is already a plain Bash command and
+already gets RTK compression plus the cache wrapper — nothing to fix. What
+costs context is *iteration*: every turn re-establishes the connection, and
+password or MFA reauth burns a round trip before any work happens.
+
+`ssh-tool.py` keeps an OpenSSH `ControlMaster` socket alive across turns:
+`open NAME user@host` once, then `run NAME -- CMD` per turn, plus `jobs`,
+`tail`, `tunnel`/`untunnel`, `copy`, `list`, `reset`, `close`. Because each
+`run` is still an ordinary wrapped Bash command, large remote output stubs
+and slices exactly like local output — no separate cache path, no new
+surface in the hook layer.
+
+It is a helper, not a hook: nothing intercepts `ssh`, and plain
+`ssh`/`sshpass` remain the right tool for anything one-off. The only
+enforcement claim is the routing snippet's recommendation.
 
 ### `lib/cch_rules.py`
 

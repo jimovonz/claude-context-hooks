@@ -18,7 +18,11 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
 
-from lib.event_log import log_event
+try:
+    from lib.event_log import log_event
+except Exception:                       # logging must never break a hook
+    def log_event(*_args, **_kwargs):
+        return None
 
 # Patterns indicating code-structure queries cairn-graph can answer.
 # Matched against the combined prompt+description text (case-insensitive).
@@ -34,6 +38,10 @@ _CODE_STRUCTURE_PATTERNS = [
         r"read\s+(?:all|every|each)\s+(?:python|source|code)\s+files?\b",
         r"(?:explore|analyze|analyse)\s+(?:the\s+)?(?:hook|intercept|codebase|code\s+structure)",
         r"(?:understand|inspect)\s+(?:how|the)\s+(?:\w+\s+)*(?:hooks?|intercepts?|enforce\w*|routing)",
+        r"(?:blast.?radius|impact)\s+(?:of|for)\s+\w+",
+        r"what\s+(?:does|is)\s+\w+\s+(?:call(?:ing)?|import(?:ing)?)\b",
+        r"(?:repo|module|codebase)\s+(?:summary|overview|orientation|map|structure)\b",
+        r"(?:key\s+)?(?:entry.?points?|hot\s+paths?|high.?fan.?in)\b",
     ]
 ]
 

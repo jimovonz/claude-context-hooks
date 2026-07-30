@@ -1,9 +1,15 @@
 # claude-context-hooks
 
-**State: v2.0.0 shipped 2026-05-02.**
-Tagged `v2.0.0` on commit `e192fa6`, pushed to
+**State: v2.1.0 shipped 2026-06-26.**
+Tagged `v2.1.0` (builds on `v2.0.0` at `e192fa6`), repo
 [`jimovonz/claude-context-hooks`](https://github.com/jimovonz/claude-context-hooks).
 Installed locally and operational.
+
+v2.1.0 adds: installer auto-provisions its binary deps (RTK, ripgrep, fd)
+rather than assuming them; `intercept-grep.py` / `intercept-glob.py` choose
+their redirect at runtime (`rg`/`fd` when present, else POSIX `grep`/`find`)
+so the suggestion never dead-ends; Agent hook routes more code-structure
+prompts to `cairn-graph`.
 
 ## What this is
 
@@ -28,21 +34,61 @@ questions. Read it before changing direction.
 
 ## Where we are right now
 
-- v2.0.0 tagged at `e192fa6`, pushed to GitHub `main`.
-- All 101 tests pass.
-- Installed locally: 14 symlinks in `~/.claude/hooks/`, 3 helper
-  symlinks in `~/.local/bin/` (`cch-edit.py`, `cch-write.py`,
-  `ccm-get.py`), 8 PreToolUse entries in `~/.claude/settings.json`.
-- Live smoke test 2026-05-02 confirmed: RTK rewrite + cache stub +
-  `ccm-get.py` slice retrieval + bare helper invocation + deny+redirect
-  on Read/WebFetch/Write all work. Edit deny is shadowed by the harness
-  read-before-edit guard but net effect (Edit unusable, must use
-  `cch-edit.py`) is identical.
+- v2.1.0 tagged on `main` (v2.0.0 was `e192fa6`); the post-v2 review pass
+  (`feature/review-fixes-and-levers`, 2026-07-30) is merged on top. 317 tests
+  pass.
+  - **Fixed:** `cch-edit`/`cch-write` replaced symlinks and silently lost the
+    edit (this repo installs its hooks *as* symlinks); the warning prefix in
+    `intercept-bash` executed `$(...)` from a path token; `install.py` wiped
+    `settings.json` whole on a JSON parse error (now fatal, refuses to write).
+  - **Closed:** `cch-batch` bypassed every guard; `PASSTHROUGH_MARKERS` matched
+    substrings; `_check_bulk_read` saw only the first pipe segment;
+    `_SESSION_MARKER` was dead so "rerun to override" was false.
+  - **Added:** shared `lib/guards.py`, `lib/atomic.py`, `lib/budget.py`,
+    `lib/delta.py`, `lib/outline.py`, `lib/supersede.py`; cache TTL/size
+    pruning; `cch-edit --symbol`; session ids on every event; honest
+    `cch-gain` accounting; `cch-eval.py` compression-fidelity harness.
+  - **Retained from the v2.1.0 line:** binary-dep provisioning in `install.py`
+    (`--skip-rtk`, `--skip-search-tools`), runtime `rg`/`fd` vs `grep`/`find`
+    choice in the Grep/Glob hooks, cairn-graph routing in the Agent hook, and
+    `ssh-tool.py` (persistent multiplexed SSH, registered in both file lists).
+  - Merge note: `install_instructions()` keeps this line's `rstrip("\n")`
+    normalization inside the review pass's `atomic_write_text` — taking the
+    review pass's version verbatim breaks `test_install_idempotent_on_claude_md`
+    (its trailing-newline handling is not byte-stable across re-installs).
+- Installed locally (reinstalled 2026-07-30 after the merge): 29 symlinks in
+  `~/.claude/hooks/` (18 top-level + 11 under `lib/`), 8 helpers on PATH via
+  `~/.local/bin/` (`cch-batch`, `cch-edit`, `cch-eval`, `cch-gain`, `cch-html`,
+  `cch-write`, `ccm-get`, `ssh-tool`), 9 PreToolUse entries in
+  `~/.claude/settings.json`. No `CCH_CACHE_THRESHOLD` in the env block — the
+  8000 default is the resolved value, so overriding it would be the regression.
+- Live smoke test 2026-07-30 (post-merge) confirmed: Read deny on `.py` and
+  allow on `.png`; Bash rewrite through `cache-wrap.py`; the `rg -r` warning
+  firing from `lib/guards.py`; `cch-html.py`, `cch-edit.py`, `ssh-tool.py`
+  executing from PATH; 4000-line output → stub → `ccm-get --lines` slice;
+  identical re-run → `[CCM_UNCHANGED]`; changed re-run → `[CCM_DELTA]`
+  emitting 111B against 18898B, with the supersession index written and the
+  superseded key still resolving through the chain; and `cch-edit.py`
+  writing *through* a symlink without replacing it — the data-loss fix
+  verified against its actual failure mode (this repo installs hooks as
+  symlinks). Edit deny stays shadowed by the harness read-before-edit guard,
+  but the net effect (Edit unusable, must use `cch-edit.py`) is identical.
 - RTK installed locally (v0.38.0, `~/.local/bin/rtk`); RTK's PreToolUse:Bash
   hook ordered before our cache wrapper in `~/.claude/settings.json`.
-- Stash `pre-repurpose snapshot of intercept-bash.py changes` (`stash@{0}`)
-  still present — pre-v2 snapshot of `intercept-bash.py`. Safe to drop
-  with `git stash drop stash@{0}` once you've confirmed v2 is solid.
+
+## Two machines, one history
+
+Development runs on two PCs (home and work) and neither sees the other's
+in-progress work, so **version-number gaps are expected, not errors** — a
+missing intermediate is almost always work that happened elsewhere, or a
+number claimed in a status header before the tag was cut.
+
+The invariant that keeps them consistent: **a version exists when its tag is
+on `origin`, not when CLAUDE.md says so.** Verify with
+`git ls-remote --tags origin`, never with local `git tag -l` (a local-only
+tag is invisible to the other machine, which is how a header can claim a
+release nothing else can see). Push tags with the commits that earn them:
+`git push --follow-tags`.
 
 ## Architecture in one breath
 
@@ -66,25 +112,61 @@ remove or replace it.
 
 ## Immediate next steps
 
-1. Soak the design over real sessions — measure correction rate (target
-   ~1-2/session) and iterate the CLAUDE.md routing snippet wording.
-2. Optionally raise the cache threshold above 8KB once we see how often
-   small post-RTK Bash outputs trip it.
-3. Re-run `rtk discover --since 7` after a week of v2 use to confirm
-   coverage rose well above the 2.9% pre-install baseline.
-4. Sanity-check README still describes the v2 shape (helpers, PATH
-   exposure via `~/.local/bin`, read-before-edit rationale).
+1. Soak with session attribution on — `cch-gain.py` can finally report
+   corrections/session, so the ~1-2 acceptance target is measurable for the
+   first time. Everything logged before 2026-07 has no session id and is
+   excluded from the rates.
+2. Watch the delta hit rate (`cch-gain` AVOIDED row). If re-reads collapse
+   often, `CCH_DELTA_MIN_BYTES` (default 1000) can come down.
+2b. **Test the stub-index hypothesis with `cch-gain.py --outline`.** The
+   section outline ships but its value rests on an unverified bet: that an
+   index makes the model retrieve less, or more narrowly. The one prior
+   instance of that bet — the symbol menu — failed it (`--symbol` reached
+   0.4% of filter uses while grep took 38%). Decision rule: if `sections
+   index` shows no lower retrieval rate and no lower ret/src than `profile
+   only` after a few weeks of real traffic, do not extend the generators.
+3. Re-run `rtk discover --since 7` to confirm coverage rose above the 2.9%
+   pre-install baseline.
+4. Sanity-check README against the v2.1 shape (guards module, budget,
+   delta, `--symbol` edits).
+
+## Interface with the Cairn proxy
+
+[`docs/CONTRACT.md`](docs/CONTRACT.md) — CCH and the proxy see different things
+by position: CCH sees raw tool output before Claude Code touches it, the proxy
+sees the assembled request and the cache breakpoints. Neither can see the
+other's view, so CCH produces recoverable stubs and the proxy manages them
+across turns. Transport is the filesystem; failure domains stay separate.
 
 ## Open questions
 
-- **Cache threshold (initial tune set to 2KB, soaking).** v1 used 8KB.
-  Empirical `cch-gain.py --dist` over an early session showed RTK
-  shrinks most output below 8KB so the wrapper barely tripped (1/92
-  events). Set `CCH_CACHE_THRESHOLD=2000` in `~/.claude/settings.json`
-  env block — should catch ~10% of commands while staying well above
-  the ~550-byte break-even floor (visible-cost only). Watch
-  `cch-gain.py --retrieval` for orphan rate over the soak week; bump
-  back up if orphans >30%.
+- **Cache threshold — RESOLVED with data (2026-07): 8000.** Two analyses,
+  and only the second one asks the right question.
+  - *Coverage view (wrong objective):* p50 output is 89B, p90 744B, p99
+    6271B; the live 6000 threshold cached 1.6% of commands. Tuning to p90
+    to "catch ~10%" gives 750 — and is a mistake.
+  - *Break-even view (right objective):* over 1023 cached events, **84% are
+    retrieved at least once** and retrieval pulls back **64% of the bytes**
+    (23.0 MB produced, 14.7 MB still emitted). Caching only pays when
+    `original − returned − stub − turn_cost > 0`. At a realistic ~500-token
+    retrieval turn, every bucket **below 8KB is net negative** (2–4KB alone:
+    −450 kB); 8–16KB breaks even; >64KB is overwhelmingly positive
+    (+5.9 MB from 40 events).
+  - So the original 8000 default was right, and both the 2000 "tune" and the
+    750 p90 value were regressions. A cache threshold is a break-even
+    question, never a percentile question.
+  - Corollary: at a median of 89B, payload size is not where the tokens go —
+    round trips are. Volume belongs on the mechanisms that need NO extra
+    turn: delta emission, passthrough, promoted symbol menus, and the graph
+    answering symbol-greps at hook time.
+  - *Considered and rejected: 2.6 kB.* Costing the round trip at only its
+    138–175 visible JSONL tokens moves break-even to
+    `(60 + 175) / (1 - 0.64)` ≈ 650 tokens ≈ 2.6 kB. That costing is the
+    wrong one: it counts the bytes of the retrieval turn but not the
+    deliberation the turn provokes, and deliberation is the larger half.
+    **8000 stands as the intended value** (2026-07-30, confirmed against the
+    local data). Only new `cch-gain --outline` evidence reopens it — not a
+    re-derivation from the same numbers.
 - **CLAUDE.md instruction snippet wording.** Iterate against real use.
   The current snippet covers helpers (`cch-edit`, `cch-write`) and the
   unconditional block on Edit/Write/NotebookEdit; correction rate from
@@ -108,9 +190,14 @@ Below that, enforcement is too lax; above, it's too aggressive. Cold-start
 sessions naturally see more before the CLAUDE.md routing snippet
 internalises.
 
-## Dependencies (user prerequisite, not auto-installed)
+## Dependencies
 
-- [RTK](https://github.com/rtk-ai/rtk) with its Claude Code Bash hook active
+Best-effort auto-installed by `install.py` (skippable; falls back gracefully):
+- [RTK](https://github.com/rtk-ai/rtk) — downloaded + `rtk init` run, unless `--skip-rtk`
+- `ripgrep` + `fd` — via the system package manager, unless `--skip-search-tools`
+  (Grep/Glob hooks fall back to `grep`/`find` when absent)
+
+User prerequisite (not auto-installed):
 - [Cairn](https://github.com/jimovonz/cairn) with UserPromptSubmit + Stop hooks
 - Python 3.10+
 - Claude Code with `hookSpecificOutput.updatedInput` support

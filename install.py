@@ -16,7 +16,9 @@ into ~/.claude/CLAUDE.md between sentinel HTML comments — re-installs replace
 that block in place; --remove strips it. Pass --no-instructions to skip.
 
 Usage:
-    python install.py                       # install hooks + instructions
+    python install.py                       # install hooks + RTK + instructions
+    python install.py --skip-rtk            # install hooks only, no RTK download
+    python install.py --skip-search-tools   # don't auto-install ripgrep + fd
     python install.py --no-instructions     # install hooks only
     python install.py --remove              # uninstall both
     python install.py --remove --no-instructions  # leave CLAUDE.md alone
@@ -25,9 +27,16 @@ Usage:
 
 import json
 import os
+import platform
 import shutil
+import subprocess
 import sys
+import tarfile
+import tempfile
+import urllib.request
 from pathlib import Path
+
+RTK_RELEASES_API = "https://api.github.com/repos/rtk-ai/rtk/releases/latest"
 
 REPO_ROOT = Path(__file__).resolve().parent
 HOOKS_SRC = REPO_ROOT / 'hooks'
@@ -36,6 +45,9 @@ BIN_DST = Path.home() / '.local' / 'bin'
 SETTINGS_FILE = Path.home() / '.claude' / 'settings.json'
 CLAUDE_MD = Path.home() / '.claude' / 'CLAUDE.md'
 SNIPPET_FILE = REPO_ROOT / 'docs' / 'CLAUDE_MD_SNIPPET.md'
+
+sys.path.insert(0, str(HOOKS_SRC))
+from lib.atomic import atomic_write_text  # noqa: E402
 
 # Sentinel markers around the auto-managed routing-policy block in
 # ~/.claude/CLAUDE.md. Re-installs replace whatever sits between them;
@@ -58,11 +70,20 @@ HOOK_FILES = [
     'cch-edit.py',
     'cch-write.py',
     'ccm-get.py',
+    'ssh-tool.py',
+    'cch-html.py',
+    'cch-eval.py',
     'lib/__init__.py',
     'lib/ccm_cache.py',
     'lib/event_log.py',
     'lib/cairn_graph_footer.py',
     'lib/cch_rules.py',
+    'lib/atomic.py',
+    'lib/guards.py',
+    'lib/budget.py',
+    'lib/delta.py',
+    'lib/outline.py',
+    'lib/supersede.py',
     'cch-gain.py',
 ]
 
@@ -77,6 +98,9 @@ BIN_FILES = [
     'cch-write.py',
     'ccm-get.py',
     'cch-gain.py',
+    'ssh-tool.py',
+    'cch-html.py',
+    'cch-eval.py',
 ]
 
 # settings.json structure. PreToolUse:Bash is appended (not replacing
@@ -100,8 +124,8 @@ def preflight() -> dict:
     rtk = shutil.which('rtk')
     checks['rtk_on_path'] = (
         rtk is not None,
-        f'rtk found at {rtk}' if rtk else
-        'rtk not found — install from https://github.com/rtk-ai/rtk for compression'
+        f"rtk found at {rtk}" if rtk else
+        "rtk not found — will auto-install (pass --skip-rtk to skip)"
     )
     py_ok = sys.version_info >= (3, 10)
     checks['python_310'] = (
@@ -115,6 +139,16 @@ def preflight() -> dict:
         f'{BIN_DST} on PATH — helpers (cch-edit.py, cch-write.py, ccm-get.py) invokable bare'
         if bin_on_path else
         f'{BIN_DST} not on PATH — add it to your shell rc, or invoke helpers via absolute path'
+    )
+    rg = shutil.which('rg')
+    fd = shutil.which('fd') or shutil.which('fdfind')
+    missing = [n for n, p in (('ripgrep', rg), ('fd', fd)) if p is None]
+    checks['search_tools'] = (
+        not missing,
+        'ripgrep + fd on PATH — Grep/Glob redirects resolve'
+        if not missing else
+        f"missing {', '.join(missing)} — will auto-install (pass --skip-search-tools "
+        "to skip); Grep/Glob hooks fall back to grep/find meanwhile"
     )
     if SETTINGS_FILE.exists():
         try:
@@ -148,6 +182,206 @@ def print_preflight(checks: dict) -> bool:
         if name == 'python_310' and not ok:
             all_blocking_ok = False
     return all_blocking_ok
+
+
+def _rtk_asset_name() -> str:
+    """Return the RTK release asset name for the current platform, or empty string."""
+    system = platform.system().lower()
+    machine = platform.machine().lower()
+    if system == "linux":
+        if machine in ("x86_64", "amd64"):
+            return "rtk-x86_64-unknown-linux-musl.tar.gz"
+        if machine in ("aarch64", "arm64"):
+            return "rtk-aarch64-unknown-linux-gnu.tar.gz"
+    elif system == "darwin":
+        if machine in ("arm64", "aarch64"):
+            return "rtk-aarch64-apple-darwin.tar.gz"
+        return "rtk-x86_64-apple-darwin.tar.gz"
+    return ""
+
+
+def _rtk_init() -> bool:
+    """Run rtk init -g --auto-patch to register the Claude Code hook."""
+    rtk = shutil.which("rtk") or str(BIN_DST / "rtk")
+    try:
+        result = subprocess.run(
+            [rtk, "init", "-g", "--auto-patch"],
+            capture_output=True, text=True,
+        )
+        if result.returncode == 0:
+            print("  INIT  rtk init -g --auto-patch")
+            return True
+        print(f"  !! rtk init failed: {result.stderr.strip()}")
+        return False
+    except Exception as exc:
+        print(f"  !! rtk init error: {exc}")
+        return False
+
+
+def install_rtk() -> bool:
+    """Download RTK binary to ~/.local/bin and register its Claude Code hook.
+
+    Returns True when RTK is available (already installed or just installed).
+    Pass --skip-rtk on the command line to skip entirely.
+    """
+    if shutil.which("rtk"):
+        print("  OK rtk already on PATH")
+        _rtk_init()
+        return True
+
+    asset = _rtk_asset_name()
+    if not asset:
+        print("  !! rtk: unsupported platform — install manually from https://github.com/rtk-ai/rtk")
+        return False
+
+    try:
+        print("  Fetching RTK release info...")
+        with urllib.request.urlopen(RTK_RELEASES_API, timeout=15) as resp:
+            release = json.loads(resp.read())
+    except Exception as exc:
+        print(f"  !! rtk: cannot fetch release info: {exc}")
+        return False
+
+    version = release.get("tag_name", "unknown")
+    url = next(
+        (a["browser_download_url"] for a in release.get("assets", []) if a["name"] == asset),
+        None,
+    )
+    if not url:
+        print(f"  !! rtk: asset {asset!r} not in {version} release — install manually")
+        return False
+
+    try:
+        print(f"  Downloading RTK {version} ({asset})...")
+        with tempfile.TemporaryDirectory() as tmp:
+            archive = os.path.join(tmp, asset)
+            urllib.request.urlretrieve(url, archive)
+            with tarfile.open(archive) as tf:
+                for member in tf.getmembers():
+                    if member.name in ("rtk", "./rtk") or member.name.endswith("/rtk"):
+                        member.name = "rtk"
+                        tf.extract(member, path=tmp, filter="data")
+                        break
+            src = os.path.join(tmp, "rtk")
+            if not os.path.exists(src):
+                print("  !! rtk: binary not found in archive")
+                return False
+            BIN_DST.mkdir(parents=True, exist_ok=True)
+            dst = BIN_DST / "rtk"
+            shutil.copy2(src, dst)
+            dst.chmod(0o755)
+            print(f"  INSTALL rtk {version} -> {dst}")
+    except Exception as exc:
+        print(f"  !! rtk: download/install failed: {exc}")
+        return False
+
+    return _rtk_init()
+
+
+# Package names per manager for the two search binaries the Grep/Glob
+# redirects target. Debian/Ubuntu ship fd's binary as `fdfind`.
+SEARCH_TOOL_PKGS = {
+    'apt-get': (['apt-get', 'install', '-y'], True, {'rg': 'ripgrep', 'fd': 'fd-find'}),
+    'dnf':     (['dnf', 'install', '-y'], True, {'rg': 'ripgrep', 'fd': 'fd-find'}),
+    'zypper':  (['zypper', 'install', '-y'], True, {'rg': 'ripgrep', 'fd': 'fd'}),
+    'pacman':  (['pacman', '-S', '--noconfirm'], True, {'rg': 'ripgrep', 'fd': 'fd'}),
+    'brew':    (['brew', 'install'], False, {'rg': 'ripgrep', 'fd': 'fd'}),
+}
+
+
+def _ensure_fd_symlink() -> None:
+    """Debian/Ubuntu install fd's binary as `fdfind`, but the routing
+    config calls it `fd`. Symlink into ~/.local/bin (user-space, no sudo)."""
+    if shutil.which('fd'):
+        return
+    fdfind = shutil.which('fdfind')
+    if not fdfind:
+        return
+    BIN_DST.mkdir(parents=True, exist_ok=True)
+    link = BIN_DST / 'fd'
+    try:
+        if link.is_symlink() or link.exists():
+            link.unlink()
+        link.symlink_to(fdfind)
+        print(f'  LINK fd -> {fdfind}')
+    except OSError as exc:
+        print(f'  !! could not symlink fd: {exc}')
+
+
+def install_search_tools() -> bool:
+    """Best-effort install of ripgrep + fd — the binaries the Grep/Glob
+    redirects point at. Non-fatal: the hooks fall back to grep/find when
+    these are absent, so a failed install only costs RTK compression on
+    those paths. Pass --skip-search-tools to skip."""
+    need = []
+    if not shutil.which('rg'):
+        need.append('rg')
+    if not (shutil.which('fd') or shutil.which('fdfind')):
+        need.append('fd')
+    if not need:
+        print('  OK ripgrep + fd already on PATH')
+        _ensure_fd_symlink()
+        return True
+
+    mgr = next((m for m in SEARCH_TOOL_PKGS if shutil.which(m)), None)
+    if mgr is None:
+        print('  !! no supported package manager found — install ripgrep + fd '
+              'manually (Grep/Glob hooks fall back to grep/find meanwhile)')
+        return False
+
+    prefix, needs_sudo, pkgmap = SEARCH_TOOL_PKGS[mgr]
+    pkgs = [pkgmap[t] for t in need]
+    use_sudo = needs_sudo and getattr(os, 'geteuid', lambda: 0)() != 0
+    cmd = (['sudo'] + prefix if use_sudo else prefix) + pkgs
+    print(f"  Installing {' + '.join(pkgs)} via {mgr}"
+          f"{' (sudo)' if use_sudo else ''}...")
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True)
+        if result.returncode != 0:
+            print(f'  !! {mgr} install failed: {result.stderr.strip()[:200]}')
+            return False
+        print(f'  INSTALL {" + ".join(pkgs)}')
+    except Exception as exc:
+        print(f'  !! search-tool install error: {exc}')
+        return False
+    _ensure_fd_symlink()
+    return True
+
+
+def _fix_bash_hook_order() -> None:
+    """Ensure RTK fires before CCH in PreToolUse:Bash — reorders in-place if needed."""
+    if not SETTINGS_FILE.exists():
+        return
+    try:
+        settings = json.loads(SETTINGS_FILE.read_text())
+    except json.JSONDecodeError:
+        return
+    pretool = settings.get("hooks", {}).get("PreToolUse", [])
+
+    bash_rtk, bash_cch, others = None, None, []
+    for entry in pretool:
+        if entry.get("matcher") == "Bash":
+            cmd = entry["hooks"][0].get("command", "") if entry.get("hooks") else ""
+            if "rtk" in cmd and bash_rtk is None:
+                bash_rtk = entry
+            elif "intercept-bash" in cmd and bash_cch is None:
+                bash_cch = entry
+            else:
+                others.append(entry)
+        else:
+            others.append(entry)
+
+    if bash_rtk is None or bash_cch is None:
+        return  # nothing to reorder
+
+    # Find current positions to detect if already correct
+    flat = [e for e in pretool if e.get("matcher") == "Bash"]
+    if flat and flat[0] is bash_rtk:
+        return  # already correct
+
+    settings["hooks"]["PreToolUse"] = others + [bash_rtk, bash_cch]
+    SETTINGS_FILE.write_text(json.dumps(settings, indent=2) + "\n")
+    print("  ORDER PreToolUse:Bash — RTK first, CCH second")
 
 
 def install_files() -> int:
@@ -235,8 +469,14 @@ def merge_settings() -> None:
     if SETTINGS_FILE.exists():
         try:
             settings = json.loads(SETTINGS_FILE.read_text())
-        except json.JSONDecodeError:
-            print(f'  WARNING: cannot parse {SETTINGS_FILE}, starting fresh')
+        except json.JSONDecodeError as e:
+            # NEVER fall through to an empty dict: this function writes the
+            # file unconditionally a few lines down, so 'starting fresh'
+            # obliterates the user's permissions, env block and RTK's own
+            # hook registration. A parse failure is fatal, not recoverable.
+            print(f'  ERROR: cannot parse {SETTINGS_FILE}: {e}')
+            print('  Refusing to overwrite it — fix the JSON and re-run.')
+            raise SystemExit(1)
 
     hooks = settings.setdefault('hooks', {})
     pretool = hooks.setdefault('PreToolUse', [])
@@ -265,7 +505,7 @@ def merge_settings() -> None:
         print(f'  ADD  {event}:{matcher} {command}')
 
     SETTINGS_FILE.parent.mkdir(parents=True, exist_ok=True)
-    SETTINGS_FILE.write_text(json.dumps(settings, indent=2) + '\n')
+    atomic_write_text(SETTINGS_FILE, json.dumps(settings, indent=2) + '\n')
     print(f'\n  Settings written to {SETTINGS_FILE}')
 
 
@@ -286,14 +526,13 @@ def install_instructions() -> None:
         # Strip the leading newline we add so we don't accumulate blank
         # lines on repeated installs.
         new = before.rstrip() + '\n' + block.lstrip('\n') + after.lstrip('\n')
-        CLAUDE_MD.write_text(new)
+        atomic_write_text(CLAUDE_MD, new)
         print(f'  UPDATE CLAUDE.md routing-policy block ({CLAUDE_MD})')
     else:
-        if existing and not existing.endswith('\n'):
-            existing += '\n'
-        CLAUDE_MD.write_text(existing + block)
-        action = 'APPEND' if existing else 'CREATE'
-        print(f'  {action} CLAUDE.md routing-policy block ({CLAUDE_MD})')
+        new = existing.rstrip("\n") + "\n" + block.lstrip("\n") if existing else block.lstrip("\n")
+        atomic_write_text(CLAUDE_MD, new)
+        action = "APPEND" if existing else "CREATE"
+        print(f"  {action} CLAUDE.md routing-policy block ({CLAUDE_MD})")
 
 
 def remove_instructions() -> None:
@@ -306,7 +545,7 @@ def remove_instructions() -> None:
     _, _, after = rest.partition(INSTRUCTIONS_END)
     new = (before.rstrip() + '\n' + after.lstrip('\n')).strip() + '\n'
     if new.strip():
-        CLAUDE_MD.write_text(new)
+        atomic_write_text(CLAUDE_MD, new)
     else:
         CLAUDE_MD.unlink()
     print(f'  STRIP CLAUDE.md routing-policy block ({CLAUDE_MD})')
@@ -355,7 +594,7 @@ def remove() -> None:
         if not settings['hooks']:
             settings.pop('hooks')
 
-    SETTINGS_FILE.write_text(json.dumps(settings, indent=2) + '\n')
+    atomic_write_text(SETTINGS_FILE, json.dumps(settings, indent=2) + '\n')
     print(f'\n  Removed {removed_reg} hook registrations from {SETTINGS_FILE}')
     print(f'  Removed {removed_files} symlinks from {HOOKS_DST}')
 
@@ -382,8 +621,17 @@ def main() -> int:
     print()
     install_bin_symlinks()
     print()
+    if "--skip-rtk" not in sys.argv:
+        print()
+        install_rtk()
+    if "--skip-search-tools" not in sys.argv:
+        print()
+        install_search_tools()
+    print()
     merge_settings()
-    if '--no-instructions' not in sys.argv:
+    print()
+    _fix_bash_hook_order()
+    if "--no-instructions" not in sys.argv:
         print()
         install_instructions()
     print('\nDone. Hooks activate on next Claude Code session.')

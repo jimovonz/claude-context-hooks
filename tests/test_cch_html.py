@@ -27,6 +27,31 @@ NEXTISH = SHELL.replace("</body>", "<script id=\"__NEXT_DATA__\" type=\"applicat
                         "</script></body>")
 
 
+@pytest.fixture
+def serve(tmp_path):
+    """Serve tmp_path over real http.
+
+    These tests used file:// URLs, which cch-html now refuses — urllib
+    honours file:// and ftp://, so an unchecked --url made a read tool into
+    a local-file read primitive. Serving over loopback exercises the same
+    escalation ladder through the scheme the tool actually supports.
+    """
+    import functools
+    import http.server
+    import threading
+
+    handler = functools.partial(http.server.SimpleHTTPRequestHandler,
+                                directory=str(tmp_path))
+    httpd = http.server.ThreadingHTTPServer(('127.0.0.1', 0), handler)
+    thread = threading.Thread(target=httpd.serve_forever, daemon=True)
+    thread.start()
+    try:
+        yield lambda name: f'http://127.0.0.1:{httpd.server_address[1]}/{name}'
+    finally:
+        httpd.shutdown()
+        httpd.server_close()
+
+
 def run_tool(*args, stdin=None):
     p = subprocess.run([sys.executable, str(HTML_TOOL), *args],
                        input=stdin.encode() if stdin else None,
@@ -56,16 +81,9 @@ def test_shell_detected_and_advised():
     assert 'looks JS-rendered' in out
 
 
-def test_json_island_extracted(tmp_path):
-    f = tmp_path / 'shell.html'
-    f.write_text(NEXTISH)
-    # simulate the ladder's rung-2 via a local file URL fetch path:
-    # direct island probe through the module
-    sys.path.insert(0, str(HTML_TOOL.parent))
-    import importlib
-    mod = importlib.import_module('cch-html'.replace('-', '_')) if False else None
-    # simpler: run --url on file:// which urllib supports
-    rc, out, _ = run_tool('--url', f.as_uri())
+def test_json_island_extracted(tmp_path, serve):
+    (tmp_path / 'shell.html').write_text(NEXTISH)
+    rc, out, _ = run_tool('--url', serve('shell.html'))
     assert rc == 0
     assert 'Hydrated content' in out  # island JSON emitted
     assert 'JSON island' in out
@@ -74,11 +92,10 @@ def test_json_island_extracted(tmp_path):
 @pytest.mark.skipif(not any(shutil.which(b) for b in
     ('google-chrome', 'google-chrome-stable', 'chromium', 'chromium-browser')),
     reason='no chrome on box')
-def test_render_rung_executes_js(tmp_path):
-    f = tmp_path / 'dyn.html'
-    f.write_text(SHELL.replace('</body>',
+def test_render_rung_executes_js(tmp_path, serve):
+    (tmp_path / 'dyn.html').write_text(SHELL.replace('</body>',
         "<script>document.getElementById('root').innerHTML='<h1>JS SAYS HI</h1>';</script></body>"))
-    rc, out, _ = run_tool('--url', f.as_uri())
+    rc, out, _ = run_tool('--url', serve('dyn.html'))
     assert rc == 0
     assert 'JS SAYS HI' in out
     assert 'rendered' in out

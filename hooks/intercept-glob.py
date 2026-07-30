@@ -1,21 +1,34 @@
 #!/usr/bin/env python3
 """
 PreToolUse:Glob — block, redirect to `fd` (or `find`) via Bash so output
-flows through the cache-wrap pipeline.
+flows through the cache-wrap pipeline. Falls back to POSIX `find` when fd
+is not installed so the redirect never dead-ends.
 """
 
 import json
 import os
+import shutil
 import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
 
-from lib.event_log import log_event
+try:
+    from lib.event_log import log_event
+except Exception:                       # logging must never break a hook
+    def log_event(*_args, **_kwargs):
+        return None
 
-REASON = (
-    "BLOCKED: Use fd PATTERN PATH (or find PATH -name 'GLOB' -type f)."
-)
+
+def _reason() -> str:
+    """Suggest fd when it is on PATH, else fall back to POSIX find so a
+    machine without fd still gets a runnable redirect."""
+    if shutil.which('fd'):
+        return "BLOCKED: Use fd PATTERN PATH (or find PATH -name 'GLOB' -type f)."
+    return (
+        "BLOCKED: Use find PATH -name 'GLOB' -type f. "
+        "[fd not on PATH — install fd-find for nicer syntax]"
+    )
 
 
 def main() -> int:
@@ -32,7 +45,7 @@ def main() -> int:
         'hookSpecificOutput': {
             'hookEventName': 'PreToolUse',
             'permissionDecision': 'deny',
-            'permissionDecisionReason': REASON,
+            'permissionDecisionReason': _reason(),
         }
     }
     json.dump(response, sys.stdout)

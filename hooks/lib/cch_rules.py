@@ -92,14 +92,7 @@ def _matches(rel: str, name: str, globs: list[str]) -> bool:
     return any(fnmatch(rel, g) or fnmatch(name, g) for g in globs)
 
 
-def _already_seen(rule: Path) -> bool:
-    SEEN_DIR.mkdir(parents=True, exist_ok=True)
-    key = f'{_session_key()}__{hashlib.blake2s(str(rule).encode(), digest_size=8).hexdigest()}'
-    marker = SEEN_DIR / key
-    if marker.exists():
-        return True
-    marker.touch()
-    # opportunistic prune
+def _prune_markers() -> None:
     try:
         cutoff = time.time() - MARKER_TTL_S
         for m in SEEN_DIR.iterdir():
@@ -107,6 +100,26 @@ def _already_seen(rule: Path) -> bool:
                 m.unlink(missing_ok=True)
     except OSError:
         pass
+
+
+def _already_seen(rule: Path) -> bool:
+    """True if this rule already fired; claiming it is atomic.
+
+    exists() followed by touch() is a race, and cch-batch runs up to --jobs
+    commands at once: several workers could all see 'not seen' and emit the
+    same rule body in one batch. O_CREAT|O_EXCL makes exactly one win.
+    """
+    key = f'{_session_key()}__{hashlib.blake2s(str(rule).encode(), digest_size=8).hexdigest()}'
+    marker = SEEN_DIR / key
+    try:
+        SEEN_DIR.mkdir(parents=True, exist_ok=True)
+        fd = os.open(str(marker), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+        os.close(fd)
+    except FileExistsError:
+        return True
+    except OSError:
+        return False
+    _prune_markers()
     return False
 
 

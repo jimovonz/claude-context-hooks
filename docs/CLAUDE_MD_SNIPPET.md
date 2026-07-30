@@ -20,6 +20,7 @@ equivalent.
 | Read a local HTML file        | `cch-html.py FILE` or pipe to stdin (READ-ONLY view — never use before editing; edit HTML source raw via `cat` + `cch-edit.py`) |
 | Project rules by file pattern | drop `.cch/rules/*.md` with `globs:` frontmatter — the rule body auto-appends (once per session) to output of any command touching a matching file |
 | Run many commands at once     | pipe one-per-line to `cch-batch.py` (concurrent, one tool call — see below) |
+| Remote work over SSH          | `ssh-tool.py open NAME user@host [--password-file PATH] [-A] [-L/-R spec]` then `ssh-tool.py run NAME -- CMD` — persistent multiplexed session (no per-turn reconnect/reauth), still gets cch caching for free since it's a plain wrapped Bash command. `ssh-tool.py --help` for detach/tunnel/copy/list/reset. Plain `ssh`/`sshpass` remain fine for anything one-off. |
 
 **cch-html — when and when not.** It is a READ tool for page *content*.
 Use it when you want what a page *says* (articles, docs, listings, any
@@ -43,6 +44,16 @@ content.
 | Callers / callees / tests     | `cairn-graph --callers SYMBOL` / `--callees` / `--tests` |
 | Repo orientation              | `cairn-graph --summary`           |
 | Past decisions about a symbol | `cairn-graph --knowledge SYMBOL`  |
+| Blast radius before an edit   | `cairn-graph --impact SYMBOL` (callers:N tests:M files:F) |
+| Body + callers + tests at once | `cairn-graph --context-pack SYMBOL` |
+| Everything in one file        | `cairn-graph --file-context FILE` |
+
+**Symbol-lookup order:** `cairn-graph --location SYMBOL` FIRST; `rg` only on a
+graph miss (and treat a miss as possible graph staleness — `crg update`).
+Symbol-shaped greps are answered from the graph at the hook layer anyway, so
+going to the graph first just skips the round-trip. Not every repo has a graph:
+it builds on first session contact and refreshes hourly, so an empty
+`--summary` means still-building, not absent.
 
 **Edit / write via Bash helpers** (no read-before-edit cost — full file
 never enters context):
@@ -52,11 +63,16 @@ never enters context):
 | Replace a literal string      | `cch-edit.py PATH 'old' 'new'` (errors if not unique; `--all` to override) |
 | Replace multi-line content    | `cch-edit.py PATH --old-file F1 --new-file F2` |
 | Write a new or full file      | `echo CONTENT \| cch-write.py PATH` or `cch-write.py PATH << 'EOF' ... EOF` |
+| Replace a whole function      | `cch-edit.py PATH --symbol NAME --new-file F` (span from the graph — never retype the old body) |
+| Apply a multi-hunk patch      | `git apply -` with a unified diff on stdin |
 | Edit a notebook               | `cch-edit.py PATH 'old_source' 'new_source'` (.ipynb is JSON; literal match works) |
 
 `cch-edit` replicates built-in `Edit`'s safety contract: literal-string
 match, errors on missing or non-unique `old_string`, atomic write,
-unified diff on success. `cch-write` is atomic (temp + rename) and
+unified diff on success. **Prefer `--symbol NAME` for whole-function
+rewrites**: reproducing the current body as `old_string` pays for it twice,
+once as input and again as output, and output tokens are the expensive
+ones. Writes follow symlinks to the real file. `cch-write` is atomic (temp + rename) and
 reads content from stdin so shell escaping is never an issue.
 
 **Use built-in `Read` only for multimodal files** that Bash can't
@@ -72,14 +88,44 @@ ccm-get.py <key> --grep PATTERN     # lines matching regex
 ccm-get.py <key> --head N            # first N lines
 ccm-get.py <key> --tail N            # last N lines
 ccm-get.py <key> --lines A-B         # line range
-ccm-get.py <key> --grep PATTERN -C 2 # with context
+ccm-get.py <key> --grep PATTERN -C 2 # with context (grep windows over-long
+                                     #   matched lines and reports c-offsets)
 ccm-get.py <key> --symbol NAME        # function body via graph.db
+ccm-get.py <key> --chars A-B         # character range (for very long lines)
 ```
+
+Stubs for code files include a `symbols: name A-B · ...` menu — prefer
+`--symbol NAME` over guessing line ranges. Every stub also carries an
+extractive outline: a `sections:` line when the output labelled its own
+sections (`==== name ====`), and a `lines: N · median M chars · max X`
+profile. Read the profile before slicing — a low line count with a huge
+max means one line holds everything, and `--lines` on it returns the lot;
+use `--chars A-B` there instead. Small whole-code-file reads may
+return inline under a `[CCM_PASSTHROUGH ...]` header instead of a stub; the
+header shows the remaining budget for the 5h window (default 25k tokens,
+`CCH_PASSTHROUGH_BUDGET`). The budget makes full-file reads a finite
+resource — spend it on files you are about to rewrite, not on surveys.
 
 Don't pull the full content. The cache wrapper warns when `--lines`,
 `--head`, or `--tail` would return ≥90% of the stub — same anti-pattern
 as `--grep "."`. If filtering genuinely cannot serve the need, use
-`--grep "." --reason "<20+ chars why>"`.
+`--grep "." --reason "<20+ chars why>"` — this now spends from the same
+finite full-content budget as passthrough, and says no when it is empty
+(`ccm-get.py --budget` shows the balance). Housekeeping:
+`ccm-get.py --prune` evicts unpinned entries past the TTL / size cap.
+
+**Never spend a whole turn on a retrieval.** A `ccm-get.py` call on its own
+costs a full round trip; folded into the next `cch-batch` alongside the work
+you were going to do anyway, it costs nothing extra. Measured: half of all
+retrievals pull back ~90% of the cached content, so if you can tell you will
+need most of it, prefer re-running a narrower command over stub-then-fetch.
+
+**Repeated output collapses.** When a command's output is byte-identical to
+its own earlier output in this session you get a one-line
+`[CCM_UNCHANGED <key>]` instead of the content; when it changed you may get
+`[CCM_DELTA <key>]` with a unified diff against the previous emission. Both
+name a key, so `ccm-get.py <key>` still produces the full text if the
+earlier copy has fallen out of context.
 
 **Parallel Bash calls are safe — batch freely.** The cache wrapper is
 fail-soft: a Bash command's non-zero exit is reported to the harness as
@@ -128,32 +174,14 @@ the same batch may see pre-edit content. Note the input is still
 line-oriented: multi-line quoted args cannot be batched; use
 `cch-edit.py --old-file/--new-file` for multi-line edits.
 
-**Worked example — tracing a code path across multiple files:**
+**Batched commands are guarded too.** The bulk-read block, the graph answer
+and the `rg -r` warning apply to every line of a batch exactly as they do to
+a normal Bash call — batching is a way to spend fewer tool calls, not a way
+around the routing rules. Any block can be overridden by re-running the
+identical command once.
 
-Don't open the entry file and read top-to-bottom. Use the graph to jump
-straight to the symbols you need.
-
-```bash
-# 1. Orient
-cairn-graph --summary                     # repo shape, top symbols
-
-# 2. Locate the entry symbol
-cairn-graph --location handle_request     # → src/server.py:142-198
-
-# 3. Read just that function (NOT the whole file)
-sed -n '142,198p' src/server.py
-
-# 4. Follow what it calls
-cairn-graph --callees handle_request      # → validate, dispatch, render
-cairn-graph --location dispatch           # → src/router.py:55-104
-sed -n '55,104p' src/router.py
-
-# 5. Verify a constant before reasoning about it
-rg -n 'TIMEOUT_MS' src/router.py
-```
-
-Anti-pattern: `cat src/server.py` then `cat src/router.py`. The
-`_check_bulk_read` block fires on `cat` of code files; even `sed -n`
-of a 200-line range when you only need 50 lines around a function
-wastes context. Use `--location SYMBOL` first, then narrow `sed -n
-A,Bp` to the function range.
+**Reading code:** never `cat` a code file top-to-bottom — the
+`_check_bulk_read` block fires on `cat` of code files. Get the range with
+`cairn-graph --location SYMBOL`, then `sed -n A,Bp` narrowed to the function.
+Even a 200-line `sed` window when you need 50 lines around a function wastes
+context.

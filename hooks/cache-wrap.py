@@ -25,8 +25,31 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
 
-from lib.ccm_cache import init_ccm_cache, store_content, build_ccm_stub
-from lib.event_log import log_event
+# This wrapper sits in front of EVERY Bash command, so a missing or broken
+# lib module must degrade to plain pass-through, never take the session down
+# with it. An unguarded import here failed twice during development and each
+# time it killed every subsequent command until the file was restored.
+try:
+    from lib.ccm_cache import init_ccm_cache, store_content, build_ccm_stub
+except Exception:
+    init_ccm_cache = store_content = build_ccm_stub = None
+try:
+    from lib.event_log import log_event
+except Exception:
+    def log_event(*_args, **_kwargs):
+        return None
+try:
+    from lib import budget
+except Exception:
+    budget = None
+try:
+    from lib.delta import MIN_BYTES as DELTA_MIN_BYTES, emission_for
+except Exception:
+    DELTA_MIN_BYTES, emission_for = 1 << 60, None
+try:
+    from lib.outline import generate_outline
+except Exception:
+    generate_outline = None
 try:
     from lib.cairn_graph_footer import generate_footer
 except ImportError:
@@ -68,10 +91,7 @@ PROPAGATE_EXIT = os.environ.get('CCH_PROPAGATE_EXIT') == '1'
 # and stubs return. Balance is printed on every passthrough so depletion is
 # visible to the model. (cairn 2336462281783: gate on finite resources, not
 # claims.)
-PASSTHROUGH_BUDGET_TOKENS = int(os.environ.get('CCH_PASSTHROUGH_BUDGET', '25000'))
 PASSTHROUGH_MAX_LINES = int(os.environ.get('CCH_PASSTHROUGH_MAX_LINES', '300'))
-PASSTHROUGH_WINDOW_S = 5 * 3600
-_BUDGET_FILE = Path.home() / '.claude' / 'cache' / 'passthrough_budget.json'
 
 
 def _passthrough_grant(inner: str, content: str, exit_code: int) -> str | None:
@@ -80,7 +100,7 @@ def _passthrough_grant(inner: str, content: str, exit_code: int) -> str | None:
     Qualifies: successful read of a single code file, ≤ PASSTHROUGH_MAX_LINES.
     Deducts from the rolling-window budget on grant.
     """
-    if PASSTHROUGH_BUDGET_TOKENS <= 0 or exit_code != 0:
+    if budget is None or budget.BUDGET_TOKENS <= 0 or exit_code != 0:
         return None
     if _extract_source_file is None:
         return None
@@ -92,35 +112,17 @@ def _passthrough_grant(inner: str, content: str, exit_code: int) -> str | None:
     lines = content.count('\n')
     if lines > PASSTHROUGH_MAX_LINES:
         return None
-    est_tokens = max(1, len(content) // 4)
+    est_tokens = budget.estimate_tokens(content)
 
-    import json
-    import time
-    now = time.time()
-    state = {'window_start': now, 'spent': 0}
-    try:
-        loaded = json.loads(_BUDGET_FILE.read_text())
-        if now - float(loaded.get('window_start', 0)) < PASSTHROUGH_WINDOW_S:
-            state = loaded
-    except (OSError, ValueError):
-        pass
-
-    remaining = PASSTHROUGH_BUDGET_TOKENS - int(state.get('spent', 0))
-    if est_tokens > remaining:
+    # One shared pool with ccm-get's full retrievals, serialized with flock:
+    # the old lock-free read-modify-write lost grants whenever cch-batch ran
+    # several commands concurrently.
+    granted, left, resets_h = budget.spend(est_tokens, kind='passthrough')
+    if not granted:
         return None
-
-    state['spent'] = int(state.get('spent', 0)) + est_tokens
-    try:
-        _BUDGET_FILE.parent.mkdir(parents=True, exist_ok=True)
-        _BUDGET_FILE.write_text(json.dumps(state))
-    except OSError:
-        return None  # cannot account → do not grant
-
-    left = PASSTHROUGH_BUDGET_TOKENS - state['spent']
-    resets_h = (PASSTHROUGH_WINDOW_S - (now - float(state['window_start']))) / 3600
     return (
         f'[CCM_PASSTHROUGH ~{est_tokens / 1000:.1f}k tokens · '
-        f'budget {left / 1000:.1f}k/{PASSTHROUGH_BUDGET_TOKENS / 1000:.0f}k left · '
+        f'budget {left / 1000:.1f}k/{budget.BUDGET_TOKENS / 1000:.0f}k left · '
         f'window resets in {resets_h:.1f}h]'
     )
 
@@ -174,7 +176,8 @@ def main() -> int:
     # argument so sys.argv[2] is normally the whole string.
     inner = ' '.join(sys.argv[2:])
 
-    init_ccm_cache()
+    if init_ccm_cache is not None:
+        init_ccm_cache()
 
     # Run inner via bash -c so shell features work. stdout is captured
     # for measurement; stderr streams through directly.
@@ -216,8 +219,40 @@ def main() -> int:
         except Exception:
             pass
 
-    if len(stdout_bytes) <= CACHE_THRESHOLD_BYTES:
-        # Inline: write through unchanged.
+    # Delta emission: this session has already been sent this command's
+    # output once. Byte-identical -> a one-line header; changed -> a diff,
+    # when the diff is materially smaller. The content is stored either way
+    # so ccm-get can still produce the full text on demand.
+    if (exit_code == 0 and emission_for is not None
+            and len(stdout_bytes) >= DELTA_MIN_BYTES):
+        try:
+            delta_content = stdout_bytes.decode('utf-8')
+        except UnicodeDecodeError:
+            delta_content = None
+        if delta_content is not None:
+            delta_key = store_content(delta_content, source={
+                'tool_name': 'Bash',
+                'command': inner[:200],
+                'exit_code': exit_code,
+            })
+            delta_text = emission_for(
+                os.environ.get('CCH_SESSION_ID', ''), inner,
+                delta_content, delta_key, exit_code)
+            if delta_text:
+                log_event('delta', cmd_head=inner[:60],
+                          original_bytes=len(stdout_bytes),
+                          stub_bytes=len(delta_text.encode('utf-8')),
+                          cached=True, cache_key=delta_key,
+                          kind='unchanged' if 'CCM_UNCHANGED' in delta_text else 'diff')
+                sys.stdout.write(delta_text)
+                if footer_line:
+                    sys.stdout.write(footer_line + '\n')
+                sys.stdout.flush()
+                return _reported_code(exit_code)
+
+    if len(stdout_bytes) <= CACHE_THRESHOLD_BYTES or store_content is None:
+        # Inline: write through unchanged (also the degraded path when the
+        # cache lib is unavailable — output still reaches the caller).
         log_event(
             'cache_wrap',
             cmd_head=inner[:60],
@@ -308,15 +343,17 @@ def main() -> int:
             menu_line = generate_symbol_menu(inner, os.getcwd())
         except Exception:
             menu_line = None
+    outline_line = generate_outline(content) if generate_outline else None
     retrieve_hint = (
         f'Retrieve: ccm-get.py {key} '
         + ('[--symbol NAME] ' if menu_line else '')
-        + '[--grep PATTERN] [--head N] [--tail N] [--lines A-B]'
+        + '[--grep PATTERN [-C N]] [--head N] [--tail N] [--lines A-B] [--chars A-B]'
     )
     # Promote cairn-graph footer + symbol menu above the stub so both are
     # visible without a retrieval round-trip.
     promoted = (footer_line + '\n' if footer_line else '') \
-        + (menu_line + '\n' if menu_line else '')
+        + (menu_line + '\n' if menu_line else '') \
+        + (outline_line + '\n' if outline_line else '')
     full_emit = promoted + stub + '\n' + retrieve_hint + '\n'
     log_event(
         'cache_wrap',
@@ -327,6 +364,12 @@ def main() -> int:
         cached=True,
         cache_key=key,
         threshold=CACHE_THRESHOLD_BYTES,
+        outline_bytes=len(outline_line) if outline_line else 0,
+        outline_sections=(
+            int(outline_line.split('sections: ', 1)[1].split(' ', 1)[0])
+            if outline_line and outline_line.startswith('sections: ') else 0
+        ),
+        has_menu=bool(menu_line),
     )
     sys.stdout.write(full_emit)
     sys.stdout.flush()
