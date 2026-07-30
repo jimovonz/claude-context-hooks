@@ -527,6 +527,22 @@ def _graph_with_tested_by(root, edges, nodes=()):
     return d / 'graph.db'
 
 
+def _graph_with_nodes(root, nodes):
+    """graph.db carrying only definition nodes: (name, file, line_start, line_end)."""
+    return _graph_with_tested_by(
+        root, [],
+        [('Function', name, f'{path}::{name}', path, a, b, 'python')
+         for name, path, a, b in nodes])
+
+
+def _add_calls_edge(db, caller, callee):
+    import sqlite3
+    conn = sqlite3.connect(str(db))
+    conn.execute("INSERT INTO edges VALUES ('CALLS',?,?,'',0.0)",
+                 (f'x.py::{caller}', f'x.py::{callee}'))
+    conn.commit(); conn.close()
+
+
 def test_tested_by_is_read_in_the_direction_it_is_written(tmp_path):
     """TESTED_BY is (source=symbol, target=test) — querying target found nothing.
 
@@ -563,3 +579,84 @@ def test_tested_by_matches_bare_source_names(tmp_path):
     assert rc == 0, err
     assert 'tests:1' in out, f'bare-name TESTED_BY not matched: {out!r}'
     assert 'test_target' in out
+
+
+# --- block misfires -----------------------------------------------------
+# Three real misfires from the 2026-07-30 session. A false-positive BLOCK is
+# expensive in a way a false-positive hint is not: it costs a whole turn to
+# reroute, so the blocking tier needs precision the advisory tier does not.
+
+def test_literal_flag_search_is_not_a_symbol_query(tmp_path):
+    """grep "add_argument('--dist'" searches for text, not for a symbol.
+
+    The callers pattern matched `SYMBOL(` followed by any quote, so a search
+    for a call WITH a string argument read as "who calls add_argument" — and
+    blocked a legitimate literal search the graph cannot serve.
+    """
+    from lib import guards
+    db = _graph_with_nodes(tmp_path, [('add_argument', 'lib/x.py', 1, 2)])
+    cmd = '''grep -n "add_argument('--dist'" hooks/cch-gain.py'''
+    assert guards.check_symbol_grep(cmd, str(tmp_path)) is None
+
+
+def test_who_calls_form_still_answers(tmp_path):
+    """The intended shape — quote, symbol, paren, SAME quote — still blocks."""
+    from lib import guards
+    db = _graph_with_nodes(tmp_path, [('store_content', 'lib/x.py', 1, 9)])
+    _add_calls_edge(db, 'main', 'store_content')
+    assert guards.graph_answer(db, 'callers', 'store_content')
+
+
+def test_ambiguous_symbol_does_not_block(tmp_path):
+    """A symbol defined in many places has no single answer.
+
+    log_event resolves to 11 definitions (a fallback stub per hook). A
+    truncated 3-of-11 list reads as if it were the answer, so ambiguity is a
+    reason to let the grep run.
+    """
+    from lib import guards
+    db = _graph_with_nodes(tmp_path, [
+        ('log_event', f'lib/h{i}.py', 1, 2) for i in range(5)])
+    assert guards.graph_answer(db, 'location', 'log_event') is None
+
+
+def test_unique_symbol_still_answers(tmp_path):
+    from lib import guards
+    db = _graph_with_nodes(tmp_path, [('_find_blob_path', 'lib/ccm.py', 211, 220)])
+    answer = guards.graph_answer(db, 'location', '_find_blob_path')
+    assert answer and '211-220' in answer
+
+
+def test_library_hub_callers_are_not_served(tmp_path):
+    """A call with no local definition is a library hub, not the graph's business.
+
+    add_argument has 86x fan-in and its caller list reads "main · main · main"
+    — noise that blocked a real search for nothing.
+    """
+    from lib import guards
+    db = _graph_with_nodes(tmp_path, [])          # no definition node
+    _add_calls_edge(db, 'main', 'add_argument')
+    assert guards.graph_answer(db, 'callers', 'add_argument') is None
+
+
+def test_batch_invocations_delegate_guards_to_their_own_lines():
+    """The hook must not guard a cch-batch heredoc as one command.
+
+    Every batched line lives inside the heredoc, so guarding the string
+    denied the whole call over one line and the other lines never ran —
+    defeating cch-batch's per-line guard, which blocks just the offending
+    line and leaves the rest running.
+    """
+    import importlib.util
+    from pathlib import Path
+    spec = importlib.util.spec_from_file_location(
+        'ib', Path(__file__).resolve().parent.parent / 'hooks' / 'intercept-bash.py')
+    ib = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(ib)
+    batch = ("cch-batch.py << 'EOF'\n"
+             "grep -n 'def target_fn' src/x.py\n"
+             "git status -sb\n"
+             "EOF")
+    assert ib._is_batch(batch) is True
+    assert ib._is_batch('git status -sb') is False
+    assert ib._is_batch('rg -n foo src/ | cch-batch.py') is True

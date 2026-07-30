@@ -26,6 +26,7 @@ The wrapper itself executes via `bash -c`, so all shell features work.
 import json
 import os
 import shlex
+import re
 import sys
 from pathlib import Path
 
@@ -52,6 +53,15 @@ def should_skip_wrap(cmd: str) -> bool:
     if guards is None:
         return True
     return guards.is_passthrough(cmd)
+
+
+# Matched on the command word so a path or a quoted mention cannot trip it.
+_BATCH_RE = re.compile(r'(?:^|[|&;]|\s)(?:\S*/)?cch-batch(?:\.py)?\b')
+
+
+def _is_batch(cmd: str) -> bool:
+    """Does this command invoke cch-batch (which guards its own lines)?"""
+    return _BATCH_RE.search(cmd) is not None
 
 
 def _deny(reason: str) -> int:
@@ -87,19 +97,27 @@ def main() -> int:
         sys.stdout.write('{}\n')
         return 0
 
-    # Blocking guards (bulk code-file read, symbol-grep answerable from the
-    # graph). A repeat of the identical command overrides once.
-    reason = guards.block(cmd, cwd)
-    if reason:
-        log_event('deny_bash_guard', sid=sid, cmd_head=cmd[:120],
-                  kind='graph' if 'graph:' in reason else 'bulk_read')
-        return _deny(reason)
+    # A cch-batch invocation carries every batched command inside its heredoc,
+    # so guarding the command STRING here evaluates all of them as one; a
+    # single guarded line then denies the whole call and the other lines never
+    # run. cch-batch already applies these exact guards per line (blocking one
+    # line, reporting it in that line's slot, leaving the rest to run), so the
+    # correct division is to delegate. Not a bypass: the same guards.block runs
+    # on each line, which is what cch-batch's own docstring promises.
+    if not _is_batch(cmd):
+        # Blocking guards (bulk code-file read, symbol-grep answerable from the
+        # graph). A repeat of the identical command overrides once.
+        reason = guards.block(cmd, cwd)
+        if reason:
+            log_event('deny_bash_guard', sid=sid, cmd_head=cmd[:120],
+                      kind='graph' if 'graph:' in reason else 'bulk_read')
+            return _deny(reason)
 
-    # Non-blocking warnings, prepended safely (never via an unquoted echo).
-    cmd, applied = guards.apply_warnings(cmd)
-    for w in applied:
-        event = ('warn_rg_replace' if 'rg -r' in w else 'warn_bulk_sed')
-        log_event(event, sid=sid, cmd_head=cmd[:120])
+        # Non-blocking warnings, prepended safely (never via an unquoted echo).
+        cmd, applied = guards.apply_warnings(cmd)
+        for w in applied:
+            event = ('warn_rg_replace' if 'rg -r' in w else 'warn_bulk_sed')
+            log_event(event, sid=sid, cmd_head=cmd[:120])
 
     env_prefix = f'CCH_SESSION_ID={shlex.quote(sid)} ' if sid else ''
     wrapped = f'{env_prefix}{WRAPPER_PATH} -- {shlex.quote(cmd)}'

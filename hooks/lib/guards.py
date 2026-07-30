@@ -61,8 +61,12 @@ _PATTERNS = [
     (re.compile(
         rf"""(?:grep|rg)\b.*(?:'|")(?:{_DEF_KEYWORDS})\s+(\w+)(?:'|")"""
     ), "location"),
+    # `grep "foo("` means "who calls foo". The quote after the paren must be
+    # the SAME quote that opened the pattern — otherwise a search for a call
+    # WITH a string argument (grep "add_argument('--dist'") reads as a symbol
+    # query, and blocks a literal-text search that the graph cannot serve.
     (re.compile(
-        r"""(?:grep|rg)\b.*(?:'|")\\?\.?(\w{2,})\((?:'|")"""
+        r"""(?:grep|rg)\b.*(['"])\\?\.?(\w{2,})\(\1"""
     ), "callers"),
     (re.compile(
         r"""(?:grep|rg)\b.*?(?:['"]|\s)(?:def\s+)?(test_\w+)(?:['"]|\s|$)"""
@@ -252,12 +256,18 @@ def graph_answer(graph_db: Path, redirect_type: str, symbol: str) -> Optional[st
         conn = sqlite3.connect(str(graph_db))
         conn.execute("PRAGMA busy_timeout=500")
         if redirect_type == "location":
+            # Fetch one more than we will show: a symbol defined in many places
+            # (per-module fallback stubs, an overridden method) has no single
+            # answer, and a truncated list reads as if it did. Ambiguity is a
+            # reason to let the grep run, not to block it.
             rows = conn.execute(
                 "SELECT file_path, line_start, line_end FROM nodes "
                 "WHERE name = ? AND kind IN ('Function', 'Class', 'Type') "
-                "ORDER BY line_start LIMIT 3",
+                "ORDER BY line_start LIMIT 4",
                 (symbol,),
             ).fetchall()
+            if len(rows) > 3:
+                return None
             if rows:
                 locs = " · ".join(f"{f}:{a}-{b}" for f, a, b in rows)
                 return (
@@ -265,6 +275,23 @@ def graph_answer(graph_db: Path, redirect_type: str, symbol: str) -> Optional[st
                     f"Body: sed -n 'A,Bp' on that span."
                 )
         elif redirect_type in ("callers", "tests", "callees"):
+            # Only answer CALLERS for symbols this repo actually DEFINES. Library calls
+            # (add_argument, get, append, print) resolve as edge targets with
+            # huge fan-in, and their caller list — "main · main · main" — is
+            # noise that blocks a legitimate search for nothing. A local
+            # definition node is what makes a symbol the graph's business. Scoped
+            # to callers: the tests pattern is test_-prefixed and the callees
+            # pattern is import-shaped, so neither can resolve to a library hub,
+            # and requiring a node there breaks thin-extraction repos where the
+            # edge exists without a definition row.
+            if redirect_type == 'callers':
+                defined = conn.execute(
+                    "SELECT 1 FROM nodes WHERE name = ? "
+                    "AND kind IN ('Function', 'Class', 'Type') LIMIT 1",
+                    (symbol,),
+                ).fetchone()
+                if not defined:
+                    return None
             edge_kind = {"callers": "CALLS", "tests": "TESTED_BY",
                          "callees": "CALLS"}[redirect_type]
             # TESTED_BY is stored as (source=tested symbol, target=test), the
@@ -303,7 +330,10 @@ def check_symbol_grep(cmd: str, cwd: str = '') -> Optional[str]:
         m = pattern.search(cmd)
         if not m:
             continue
-        symbol = next((g for g in m.groups() if g is not None), None)
+        # Skip a captured quote delimiter (the callers pattern backreferences
+        # it); the symbol is the first group that is not a lone quote char.
+        symbol = next((g for g in m.groups()
+                       if g is not None and g not in ('"', "'")), None)
         if symbol is None:
             return None
         graph_db = graph_db_for(cwd)
