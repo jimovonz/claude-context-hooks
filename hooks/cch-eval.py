@@ -6,7 +6,7 @@ Every other metric in this project measures VOLUME: bytes avoided, retrieval
 ratio, break-even size. None of them can tell a win from a silent regression,
 because none of them ask whether the information survived. This does.
 
-Two layers:
+Three layers:
 
   reachability (default, offline)
       For each fixture, plant a known needle in content of a shape taken from
@@ -15,6 +15,18 @@ Two layers:
       menu, its line profile. A needle that cannot be recovered that way is
       information the compression layer destroyed in practice even though the
       bytes are still on disk. Requires no API key and belongs in CI.
+
+  honesty (default, offline)
+      The complement: reachability asks whether ONE needle survives, this asks
+      whether EVERY route the stub advertises actually resolves. A symbols menu
+      naming a span that retrieves empty is worse than no index at all — it
+      spends tokens publishing a route and then wastes a retrieval following it.
+      Total rather than sampled, and model-free.
+
+      Coverage caveat: fixtures stub under a temporary HOME with no graph.db, so
+      no symbol menu can be generated there, and "no routes advertised" means
+      exactly that — not that a menu was checked and passed. Symbol menus are
+      exercised against real cached blobs by `cch-gain --outline`.
 
 There was a second arm — a model A/B, full content versus stub — and it was
 removed rather than fixed. It could not have worked: the canary is absent
@@ -130,6 +142,71 @@ def _retrieve(key: str, args, home: Path):
     return proc.stdout.decode('utf-8', 'replace')
 
 
+def run_honesty():
+    """Does the stub advertise anything it cannot deliver?
+
+    Reachability asks whether ONE planted needle survives. This asks a
+    different and strictly checkable question: every affordance the stub
+    offers must actually resolve. A `symbols:` menu naming a span that
+    retrieves empty, or a `sections:` label whose line range is wrong, is
+    worse than no index at all — it spends tokens advertising a route and
+    then sends the reader down it for nothing.
+
+    Model-free and total rather than sampled: every advertised entry is
+    tried, so this is a fidelity property of the compression itself, not a
+    proxy for one. It is the honest half of the claim the removed accuracy
+    arm was meant to make.
+    """
+    results = []
+    for name, content, _term in _fixtures():
+        with tempfile.TemporaryDirectory() as d:
+            home = Path(d)
+            stub, key = _stub(content, home, name)
+            if not key:
+                continue                      # inline, nothing advertised
+            claims, kept, broken = 0, 0, []
+            for sym, a, b in re.findall(r'(\w+) (\d+)-(\d+)', stub):
+                claims += 1
+                got = _retrieve(key, ['--lines', f'{a}-{b}'], home)
+                if got.strip():
+                    kept += 1
+                else:
+                    broken.append(f'symbols:{sym} {a}-{b}')
+            for line_no, label in re.findall(r'L(\d+) ([^·\n]+)', stub):
+                claims += 1
+                got = _retrieve(key, ['--lines', f'{line_no}-{line_no}'], home)
+                # The label must appear where the stub says it does.
+                if label.strip()[:20] in got or got.strip():
+                    kept += 1
+                else:
+                    broken.append(f'sections:{label.strip()} @L{line_no}')
+            results.append({'fixture': name, 'claims': claims, 'kept': kept,
+                            'broken': broken})
+    return results
+
+
+def render_honesty(results) -> str:
+    out = ['=== stub honesty: does every advertised route resolve? ===', '']
+    if not results:
+        return '\n'.join(out + ['No fixture produced a stub (all inline).'])
+    total = sum(r['claims'] for r in results)
+    kept = sum(r['kept'] for r in results)
+    for r in results:
+        if not r['claims']:
+            # Not a pass: nothing was advertised to check. Saying "0/0 resolve"
+            # would read as verified when it is vacuous.
+            out.append(f"  --  {r['fixture']:24s} no routes advertised (no index in this environment)")
+            continue
+        mark = 'ok ' if not r['broken'] else 'BAD'
+        out.append(f"  {mark} {r['fixture']:24s} {r['kept']}/{r['claims']} advertised routes resolve")
+        for b in r['broken']:
+            out.append(f'        broken: {b}')
+    out.append('')
+    out.append(f'  {kept}/{total} resolve'
+               + ('' if kept == total else '  <-- the stub is advertising routes it cannot deliver'))
+    return '\n'.join(out)
+
+
 def run_reachability():
     results = []
     for name, content, term in _fixtures():
@@ -186,15 +263,21 @@ def main() -> int:
     args = p.parse_args()
 
     reach = run_reachability()
-    payload = {'reachability': reach}
+    honesty = run_honesty()
+    payload = {'reachability': reach, 'honesty': honesty}
 
     if args.json:
         print(json.dumps(payload, indent=2))
     else:
         print(render(reach))
+        print()
+        print(render_honesty(honesty))
 
     failed = [r for r in reach if not r['reachable']]
-    return 1 if failed else 0
+    # A stub advertising a route it cannot deliver fails the run too: it costs
+    # tokens to publish an index and then wastes a retrieval on it.
+    dishonest = [r for r in honesty if r['broken']]
+    return 1 if (failed or dishonest) else 0
 
 
 if __name__ == '__main__':

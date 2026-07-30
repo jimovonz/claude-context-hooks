@@ -37,6 +37,7 @@ import sys
 from collections import defaultdict
 from datetime import datetime, timedelta
 from pathlib import Path
+from typing import Optional
 
 EVENTS_LOG = Path.home() / '.claude' / 'cache' / 'ccm' / 'events.jsonl'
 RETRIEVAL_LOG = Path.home() / '.claude' / 'cache' / 'ccm' / 'retrieval.log'
@@ -469,6 +470,41 @@ def _nav_kind(cmd: str):
     return None
 
 
+def _cairn_assist_counts(since: datetime) -> Optional[dict]:
+    """Per-session counts of graph context Cairn served without a tool call.
+
+    Optional cross-repo read, in the spirit of docs/CONTRACT.md: if Cairn's
+    ephemeral metrics DB is reachable we use it, if not we say so and report
+    the call-only number. Never raises, never required.
+    """
+    import os
+    import sqlite3
+    candidates = [os.environ.get('CCH_CAIRN_EPHEMERAL_DB'),
+                  os.environ.get('CAIRN_EPHEMERAL_DB_PATH'),
+                  str(Path.home() / '.cairn' / 'cairn-ephemeral.db'),
+                  '/mnt/ssd/Projects/cairn/cairn/cairn-ephemeral.db']
+    for path in [c for c in candidates if c]:
+        if not Path(path).exists():
+            continue
+        try:
+            conn = sqlite3.connect(f'file:{path}?mode=ro', uri=True)
+            rows = conn.execute(
+                "SELECT session_id, event, COUNT(*) FROM metrics "
+                "WHERE event IN ('graph_symbol_context_served', "
+                "'graph_directive_staged') AND created_at >= ? "
+                "GROUP BY session_id, event",
+                (since.isoformat(sep=' ', timespec='seconds'),),
+            ).fetchall()
+            conn.close()
+            out = defaultdict(lambda: defaultdict(int))
+            for sid, event, n in rows:
+                out[sid or ''][event] += n
+            return out
+        except sqlite3.Error:
+            continue
+    return None
+
+
 def render_tools(since: datetime, days: int) -> str:
     """Is the graph being used where it is the cheaper tool?
 
@@ -508,7 +544,26 @@ def render_tools(since: datetime, days: int) -> str:
     out.append(f'    cairn-graph          {overall["graph"]:6d}')
     out.append(f'    symbol-shaped search {overall["search"]:6d}')
     out.append(f'    code file read       {overall["read"]:6d}')
-    out.append(f'  GRAPH-FIRST: {_rate(overall):.1f}%')
+    out.append('')
+    # Two questions, not one. A served hint hands over the answer and so
+    # REMOVES the reason to call the tool — scoring it in the call-only rate
+    # makes a working intervention look like a failure. "Chose" measures
+    # behaviour; "reached" measures whether the system delivered at all.
+    assist = _cairn_assist_counts(since)
+    served = (sum(c['graph_symbol_context_served'] for c in assist.values())
+              if assist is not None else 0)
+    staged = (sum(c['graph_directive_staged'] for c in assist.values())
+              if assist is not None else 0)
+    out.append(f'  CHOSE the graph:   {_rate(overall):5.1f}%   '
+               f'({overall["graph"]} calls / {denom} navigation)')
+    if assist is None:
+        out.append('  REACHED the model:     n/a   '
+                   '(Cairn metrics DB not reachable — call-only figure above)')
+    else:
+        reached = 100.0 * (overall['graph'] + served) / (denom + served) if denom + served else 0.0
+        out.append(f'  REACHED the model: {reached:5.1f}%   '
+                   f'({overall["graph"]} calls + {served} served hints)')
+        out.append(f'  directives staged: {staged}')
     out.append('')
 
     navsess = {s: c for s, c in per_sid.items()
